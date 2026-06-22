@@ -98,7 +98,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    use chrono::{DateTime, FixedOffset};
+    use chrono::{DateTime, FixedOffset, NaiveDate};
 
     use mybtrfs_domain::model::{Subvolume, Uuid};
     use mybtrfs_domain::retention::{PreserveMin, RetentionPolicy};
@@ -290,6 +290,61 @@ mod tests {
                 PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240101T1200"),
                 DeleteCommit::Deferred
             )]
+        );
+    }
+
+    // --- dated_entry timezone resolution ---
+
+    #[test]
+    fn dated_entry_resolves_long_name_against_reference_timezone() {
+        let plus2 = FixedOffset::east_opt(2 * 3600).expect("valid offset");
+        let sv = snap(1, "home.20240102T1200"); // long format, no embedded offset
+        let entry = super::dated_entry(&sv, plus2).expect("name parses");
+
+        // 12:00 wall-clock interpreted at +02:00 is 10:00 UTC.
+        assert_eq!(
+            entry.instant,
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        );
+        // The reference-tz wall-clock used for calendar math stays 12:00.
+        assert_eq!(
+            entry.local,
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+        );
+        assert!(entry.has_exact_time);
+    }
+
+    #[test]
+    fn dated_entry_uses_embedded_offset_for_long_iso_names() {
+        let reference = FixedOffset::east_opt(0).expect("valid offset"); // UTC reference
+        let sv = snap(2, "home.20240102T120000+0200"); // long-iso, +02:00
+        let entry = super::dated_entry(&sv, reference).expect("name parses");
+
+        // 12:00+0200 is the absolute instant 10:00 UTC, regardless of reference tz.
+        assert_eq!(
+            entry.instant,
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        );
+        // Expressed in the reference tz (UTC), that instant's wall-clock is 10:00.
+        assert_eq!(
+            entry.local,
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap()
         );
     }
 }
