@@ -10,9 +10,10 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, PortError, SnapshotPort, SubvolumeRepository,
+    DeleteCommit, DeletePort, PortError, SnapshotPort, SubvolumeRepository, TransferPort,
 };
 use mybtrfs_domain::model::{Subvolume, Uuid};
+use mybtrfs_domain::parent::ParentSelection;
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 
@@ -22,7 +23,9 @@ const BTRFS: &str = "btrfs";
 /// [`SubvolumeRepository`] over the real `btrfs` CLI, scoped to a single
 /// filesystem — its `fs_uuid` and `mountpoint`, as discovered by the
 /// drive-discovery adapter. Those identify the owning filesystem for every
-/// parsed [`Subvolume`], which the btrfs output itself does not carry.
+/// parsed [`Subvolume`], which the btrfs output itself does not carry. For a
+/// transfer, this is the **target** adapter (the received subvolume lives on the
+/// target filesystem); the source is carried in by the source [`Subvolume`].
 pub struct BtrfsCliAdapter {
     runner: Box<dyn CommandRunner>,
     fs_uuid: Uuid,
@@ -142,6 +145,98 @@ impl SnapshotPort for BtrfsCliAdapter {
     }
 }
 
+impl TransferPort for BtrfsCliAdapter {
+    fn send_receive(
+        &self,
+        source: &Subvolume,
+        selection: &ParentSelection,
+        target_dir: &Path,
+    ) -> Result<Subvolume, PortError> {
+        // Build the absolute source/parent/clone paths (each Subvolume carries its
+        // own mountpoint), then `btrfs send [-p parent] [-c clone…] <source>`.
+        let source_path = source.mountpoint.join(&source.path);
+        let parent_path = selection
+            .parent
+            .as_ref()
+            .map(|parent| parent.mountpoint.join(&parent.path));
+        let clone_paths: Vec<PathBuf> = selection
+            .clone_sources
+            .iter()
+            .map(|clone| clone.mountpoint.join(&clone.path))
+            .collect();
+
+        let mut send_args: Vec<&OsStr> = vec![OsStr::new("send")];
+        if let Some(parent_path) = &parent_path {
+            send_args.push(OsStr::new("-p"));
+            send_args.push(parent_path.as_os_str());
+        }
+        for clone_path in &clone_paths {
+            send_args.push(OsStr::new("-c"));
+            send_args.push(clone_path.as_os_str());
+        }
+        send_args.push(source_path.as_os_str());
+
+        let receive_args = [OsStr::new("receive"), target_dir.as_os_str()];
+
+        // Send/receive, then ALWAYS inspect the target: even on a pipe error a
+        // partially-received (garbled) subvolume may be left behind and must be
+        // cleaned up (invariant #2); a success is never trusted on exit code (#1).
+        let transfer = self
+            .runner
+            .pipe((BTRFS, &send_args), (BTRFS, &receive_args));
+
+        let received_name = source.path.file_name().ok_or_else(|| {
+            PortError::Verification(format!("source subvolume {:?} has no name", source.path))
+        })?;
+        let received_path = target_dir.join(received_name);
+
+        match self.show(&received_path) {
+            Ok(received) => {
+                if received.is_garbled() {
+                    // btrfs-progs leaves garbled subvolumes behind; delete by hand.
+                    let _ = self.delete(&received_path, DeleteCommit::Each);
+                }
+                transfer?; // a pipe failure surfaces here (garbled already cleaned)
+                verify_received(&received, selection.parent.is_none())?;
+                Ok(received)
+            }
+            Err(show_error) => {
+                // No inspectable target: report the pipe failure if any, else the
+                // fact that the receive silently produced nothing.
+                transfer?;
+                Err(show_error)
+            }
+        }
+    }
+}
+
+/// Plausibility checks on a received subvolume (mirrors btrbk's post-receive
+/// checks): read-only, `received_uuid` set, and `parent_uuid` matching the
+/// transfer mode — absent for a full send, present for an incremental one.
+fn verify_received(received: &Subvolume, full: bool) -> Result<(), PortError> {
+    let mut problems: Vec<&str> = Vec::new();
+    if !received.readonly {
+        problems.push("target is not read-only");
+    }
+    if received.received_uuid.is_none() {
+        problems.push("received_uuid is not set");
+    }
+    if full && received.parent_uuid.is_some() {
+        problems.push("parent_uuid is set on a full receive");
+    }
+    if !full && received.parent_uuid.is_none() {
+        problems.push("parent_uuid is not set on an incremental receive");
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(PortError::Verification(format!(
+            "send/receive verification failed: {}",
+            problems.join("; ")
+        )))
+    }
+}
+
 impl DeletePort for BtrfsCliAdapter {
     fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
         let mut args: Vec<&OsStr> = vec![OsStr::new("subvolume"), OsStr::new("delete")];
@@ -170,6 +265,8 @@ impl BtrfsCliAdapter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn fs() -> Uuid {
         Uuid::parse("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap()
@@ -177,6 +274,23 @@ mod tests {
 
     fn mountpoint() -> PathBuf {
         PathBuf::from("/mnt/pool")
+    }
+
+    /// A minimal source/parent subvolume (only path + mountpoint matter for the
+    /// commands the adapter builds).
+    fn source_subvol(path: &str) -> Subvolume {
+        Subvolume {
+            id: 256,
+            uuid: Uuid::parse("a1a1a1a1-1111-4111-8111-111111111111"),
+            parent_uuid: None,
+            received_uuid: None,
+            generation: 100,
+            cgen: 100,
+            readonly: true,
+            path: PathBuf::from(path),
+            fs_uuid: fs(),
+            mountpoint: mountpoint(),
+        }
     }
 
     const SHOW: &str = "\
@@ -201,6 +315,42 @@ backups/@data.20260622T1900
     Flags:              readonly
 ";
 
+    // A received full backup: read-only, received_uuid set, no parent_uuid.
+    const RECEIVED_FULL: &str = "\
+@data.20260622T1900
+    UUID:               d4d4d4d4-4444-4444-8444-444444444444
+    Parent UUID:        -
+    Received UUID:      a1a1a1a1-1111-4111-8111-111111111111
+    Subvolume ID:       300
+    Generation:         5
+    Gen at creation:    5
+    Flags:              readonly
+";
+
+    // A received incremental backup: like the full one, but with parent_uuid set.
+    const RECEIVED_INCREMENTAL: &str = "\
+@data.20260622T1900
+    UUID:               d4d4d4d4-4444-4444-8444-444444444444
+    Parent UUID:        e5e5e5e5-5555-4555-8555-555555555555
+    Received UUID:      a1a1a1a1-1111-4111-8111-111111111111
+    Subvolume ID:       300
+    Generation:         5
+    Gen at creation:    5
+    Flags:              readonly
+";
+
+    // A garbled receive: writable with no received_uuid (btrfs leaves these behind).
+    const RECEIVED_GARBLED: &str = "\
+@data.20260622T1900
+    UUID:               d4d4d4d4-4444-4444-8444-444444444444
+    Parent UUID:        -
+    Received UUID:      -
+    Subvolume ID:       300
+    Generation:         5
+    Gen at creation:    5
+    Flags:              -
+";
+
     const LIST: &str = "\
 ID 256 gen 120 cgen 95 top level 5 parent_uuid - received_uuid - uuid a1a1a1a1-1111-4111-8111-111111111111 path @data
 ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-222222222222 received_uuid a1a1a1a1-1111-4111-8111-111111111111 uuid c3c3c3c3-3333-4333-8333-333333333333 path <FS_TREE>/backups/@data.20260622T1900
@@ -209,11 +359,14 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
     const READONLY: &str =
         "ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900\n";
 
+    /// Fake runner: returns canned output keyed on the btrfs subcommand, records
+    /// every invocation (so tests can assert flags), and can simulate failure.
     struct FakeBtrfs {
         show: String,
         list: String,
         readonly: String,
         fail: bool,
+        calls: Rc<RefCell<Vec<Vec<String>>>>,
     }
 
     impl Default for FakeBtrfs {
@@ -223,12 +376,22 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
                 list: LIST.to_owned(),
                 readonly: READONLY.to_owned(),
                 fail: false,
+                calls: Rc::new(RefCell::new(Vec::new())),
             }
         }
     }
 
+    impl FakeBtrfs {
+        fn record(&self, program: &str, args: &[&OsStr]) {
+            let mut call = vec![program.to_owned()];
+            call.extend(args.iter().map(|a| a.to_string_lossy().into_owned()));
+            self.calls.borrow_mut().push(call);
+        }
+    }
+
     impl CommandRunner for FakeBtrfs {
-        fn run(&self, _program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+        fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+            self.record(program, args);
             if self.fail {
                 return Err(PortError::Command("simulated btrfs failure".to_owned()));
             }
@@ -248,10 +411,32 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
                 )))
             }
         }
+
+        fn pipe(
+            &self,
+            producer: (&str, &[&OsStr]),
+            consumer: (&str, &[&OsStr]),
+        ) -> Result<(), PortError> {
+            self.record(producer.0, producer.1);
+            self.record(consumer.0, consumer.1);
+            if self.fail {
+                return Err(PortError::Command("simulated pipe failure".to_owned()));
+            }
+            Ok(())
+        }
     }
 
     fn repo(runner: FakeBtrfs) -> BtrfsCliAdapter {
         BtrfsCliAdapter::with_runner(Box::new(runner), fs(), mountpoint())
+    }
+
+    /// Build an adapter over a fake whose recorded calls the test can inspect.
+    fn recording_repo(fake: FakeBtrfs) -> (BtrfsCliAdapter, Rc<RefCell<Vec<Vec<String>>>>) {
+        let calls = Rc::clone(&fake.calls);
+        (
+            BtrfsCliAdapter::with_runner(Box::new(fake), fs(), mountpoint()),
+            calls,
+        )
     }
 
     #[test]
@@ -329,32 +514,126 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         assert!(!sv.readonly);
     }
 
-    /// Records the argv of each invocation so tests can assert flags.
-    struct RecordingRunner {
-        calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+    #[test]
+    fn send_receive_full_backup_verifies_and_returns() {
+        let received = repo(FakeBtrfs {
+            show: RECEIVED_FULL.to_owned(),
+            ..FakeBtrfs::default()
+        })
+        .send_receive(
+            &source_subvol("snapshots/@data.20260622T1900"),
+            &ParentSelection::default(),
+            Path::new("/mnt/pool/backups"),
+        )
+        .unwrap();
+        assert!(received.readonly);
+        assert!(received.received_uuid.is_some());
+        assert_eq!(received.parent_uuid, None);
     }
 
-    impl CommandRunner for RecordingRunner {
-        fn run(&self, _program: &str, args: &[&OsStr]) -> Result<String, PortError> {
-            self.calls.borrow_mut().push(
-                args.iter()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect(),
-            );
-            Ok(String::new())
-        }
+    #[test]
+    fn send_receive_incremental_accepts_set_parent_uuid() {
+        let selection = ParentSelection {
+            parent: Some(source_subvol("snapshots/@data.20260621T1900")),
+            clone_sources: Vec::new(),
+        };
+        let received = repo(FakeBtrfs {
+            show: RECEIVED_INCREMENTAL.to_owned(),
+            ..FakeBtrfs::default()
+        })
+        .send_receive(
+            &source_subvol("snapshots/@data.20260622T1900"),
+            &selection,
+            Path::new("/mnt/pool/backups"),
+        )
+        .unwrap();
+        assert!(received.parent_uuid.is_some());
+    }
+
+    #[test]
+    fn send_receive_full_rejects_a_set_parent_uuid() {
+        // RECEIVED_INCREMENTAL has parent_uuid set, but this is a full send.
+        let err = repo(FakeBtrfs {
+            show: RECEIVED_INCREMENTAL.to_owned(),
+            ..FakeBtrfs::default()
+        })
+        .send_receive(
+            &source_subvol("snapshots/@data.20260622T1900"),
+            &ParentSelection::default(),
+            Path::new("/mnt/pool/backups"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PortError::Verification(_)));
+    }
+
+    #[test]
+    fn send_receive_deletes_a_garbled_result() {
+        let (adapter, calls) = recording_repo(FakeBtrfs {
+            show: RECEIVED_GARBLED.to_owned(),
+            ..FakeBtrfs::default()
+        });
+        let err = adapter
+            .send_receive(
+                &source_subvol("snapshots/@data.20260622T1900"),
+                &ParentSelection::default(),
+                Path::new("/mnt/pool/backups"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Verification(_)));
+        // The garbled subvolume was deleted by hand.
+        assert!(
+            calls
+                .borrow()
+                .iter()
+                .any(|call| call.iter().any(|arg| arg.as_str() == "delete"))
+        );
+    }
+
+    #[test]
+    fn send_receive_passes_parent_flag_for_incremental() {
+        let (adapter, calls) = recording_repo(FakeBtrfs {
+            show: RECEIVED_INCREMENTAL.to_owned(),
+            ..FakeBtrfs::default()
+        });
+        let selection = ParentSelection {
+            parent: Some(source_subvol("snapshots/@data.20260621T1900")),
+            clone_sources: Vec::new(),
+        };
+        adapter
+            .send_receive(
+                &source_subvol("snapshots/@data.20260622T1900"),
+                &selection,
+                Path::new("/mnt/pool/backups"),
+            )
+            .unwrap();
+        // The send leg carried `-p <parent>`.
+        assert!(
+            calls
+                .borrow()
+                .iter()
+                .any(|call| call.iter().any(|a| a.as_str() == "send")
+                    && call.iter().any(|a| a.as_str() == "-p"))
+        );
+    }
+
+    #[test]
+    fn send_receive_propagates_pipe_failure() {
+        let err = repo(FakeBtrfs {
+            fail: true,
+            ..FakeBtrfs::default()
+        })
+        .send_receive(
+            &source_subvol("snapshots/@data.20260622T1900"),
+            &ParentSelection::default(),
+            Path::new("/mnt/pool/backups"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PortError::Command(_)));
     }
 
     #[test]
     fn delete_passes_commit_each_only_when_requested() {
-        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
-        let adapter = BtrfsCliAdapter::with_runner(
-            Box::new(RecordingRunner {
-                calls: std::rc::Rc::clone(&calls),
-            }),
-            fs(),
-            mountpoint(),
-        );
+        let (adapter, calls) = recording_repo(FakeBtrfs::default());
         adapter
             .delete(Path::new("/mnt/pool/snap"), DeleteCommit::Deferred)
             .unwrap();
