@@ -9,7 +9,7 @@ pub(crate) mod parse;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use mybtrfs_application::ports::{PortError, SubvolumeRepository};
+use mybtrfs_application::ports::{PortError, SnapshotPort, SubvolumeRepository};
 use mybtrfs_domain::model::{Subvolume, Uuid};
 
 use crate::command::{CommandRunner, SystemCommandRunner};
@@ -97,6 +97,49 @@ impl SubvolumeRepository for BtrfsCliAdapter {
     }
 }
 
+impl SnapshotPort for BtrfsCliAdapter {
+    fn create_readonly(&self, source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
+        self.runner.run(
+            BTRFS,
+            &[
+                OsStr::new("subvolume"),
+                OsStr::new("snapshot"),
+                OsStr::new("-r"),
+                source.as_os_str(),
+                dest.as_os_str(),
+            ],
+        )?;
+        let created = self.show(dest)?;
+        if !created.readonly {
+            return Err(PortError::Verification(format!(
+                "snapshot of {source:?} at {dest:?} is not read-only"
+            )));
+        }
+        Ok(created)
+    }
+
+    fn make_writable(&self, source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
+        // No `-r`: the only sanctioned route to a writable subvolume (restore);
+        // never `btrfs property set ro=false`, which poisons received_uuid (invariant #7).
+        self.runner.run(
+            BTRFS,
+            &[
+                OsStr::new("subvolume"),
+                OsStr::new("snapshot"),
+                source.as_os_str(),
+                dest.as_os_str(),
+            ],
+        )?;
+        let created = self.show(dest)?;
+        if created.readonly {
+            return Err(PortError::Verification(format!(
+                "writable snapshot of {source:?} at {dest:?} is unexpectedly read-only"
+            )));
+        }
+        Ok(created)
+    }
+}
+
 #[cfg(test)]
 impl BtrfsCliAdapter {
     /// Test constructor injecting a fake command runner in place of `btrfs`.
@@ -131,6 +174,17 @@ mod tests {
     Generation:         120
     Gen at creation:    95
     Flags:              -
+";
+
+    const SHOW_READONLY: &str = "\
+backups/@data.20260622T1900
+    UUID:               c3c3c3c3-3333-4333-8333-333333333333
+    Parent UUID:        a1a1a1a1-1111-4111-8111-111111111111
+    Received UUID:      -
+    Subvolume ID:       260
+    Generation:         130
+    Gen at creation:    130
+    Flags:              readonly
 ";
 
     const LIST: &str = "\
@@ -172,6 +226,8 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
                 Ok(self.readonly.clone())
             } else if has("list") && has("-c") && has("-u") && has("-q") && has("-R") {
                 Ok(self.list.clone())
+            } else if has("snapshot") {
+                Ok(String::new()) // `btrfs subvolume snapshot` prints only a success line
             } else {
                 Err(PortError::Command(format!(
                     "unexpected btrfs invocation: {args:?}"
@@ -219,5 +275,43 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         .show(Path::new("/mnt/pool/@data"))
         .unwrap_err();
         assert!(matches!(err, PortError::Command(_)));
+    }
+
+    #[test]
+    fn create_readonly_returns_the_readonly_snapshot() {
+        let sv = repo(FakeBtrfs {
+            show: SHOW_READONLY.to_owned(),
+            ..FakeBtrfs::default()
+        })
+        .create_readonly(
+            Path::new("/mnt/pool/@data"),
+            Path::new("/mnt/pool/backups/@data.20260622T1900"),
+        )
+        .unwrap();
+        assert!(sv.readonly);
+        assert_eq!(sv.id, 260);
+    }
+
+    #[test]
+    fn create_readonly_rejects_a_writable_result() {
+        // SHOW (the default) is writable, so the post-snapshot check must fail.
+        let err = repo(FakeBtrfs::default())
+            .create_readonly(
+                Path::new("/mnt/pool/@data"),
+                Path::new("/mnt/pool/backups/@data.20260622T1900"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Verification(_)));
+    }
+
+    #[test]
+    fn make_writable_returns_a_writable_snapshot() {
+        let sv = repo(FakeBtrfs::default()) // SHOW is writable
+            .make_writable(
+                Path::new("/mnt/pool/backups/@data.20260622T1900"),
+                Path::new("/mnt/pool/restore/@data"),
+            )
+            .unwrap();
+        assert!(!sv.readonly);
     }
 }
