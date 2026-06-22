@@ -1,0 +1,26 @@
+[package]
+name = "mybtrfs"
+version = "0.1.0"
+edition = "2024"
+description = "A backup tool for btrfs subvolumes (a Rust reimagining of btrbk)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jvidal86/mybtrfs"
+readme = "README.md"
+authors = ["jvidal86"]
+
+[dependencies]
+anyhow = "1.0.102"
+chrono = "0.4.45"
+clap = { version = "4.6.1", features = ["derive"] }
+regex = "1.12.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+
+# Crate-wide lints (see documentation/04-coding-guidelines.md §9).
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
