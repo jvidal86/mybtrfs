@@ -156,6 +156,86 @@ Three replaceable pieces behind one comparator, reusing the e2e fixture in
 
 ---
 
+## Test isolation & sandboxing (no damage to the dev disk)
+
+This suite is uniquely dangerous: it runs **as root** and issues `mkfs.btrfs`, `losetup`,
+`mount`, `btrfs subvolume delete`, and `send | receive`. A harness bug must not be able to
+reach the developer's real disk. Containment is therefore a first-class requirement, not an
+afterthought.
+
+### Threat model — three ways the host disk could die
+1. **A destructive op targeting a host path** — a delete/mkfs whose path resolves outside the
+   intended sandbox (empty variable → `/`, a `..`, or a mountpoint colliding with a real
+   `/mnt/...`).
+2. **mkfs on a real block device** — `/dev/sdX` instead of the intended loop image.
+3. **Leaked kernel resources** — loop devices and mounts are *host-global*; a crashed test can
+   leave `/dev/loopN` and stale mounts behind.
+
+Loopback images already isolate **data** (operations act on a file-backed loop device, not a
+partition). Sandboxing adds the missing ring: isolating **paths, mounts, and ideally the
+kernel** so that even a root-privileged harness bug cannot escape.
+
+### Three rings of defense (use all three)
+
+**Ring 1 — harness guards (always on, in code):**
+- **Sandbox gate:** the destructive suite `panic!`s at startup unless `MYBTRFS_TEST_SANDBOX=1`
+  is set (only the container/VM sets it) → it can never run on a bare dev box by accident.
+- **Containment assertion:** everything lives under one `mktemp -d` root; every mkfs/mount/
+  delete target is asserted to be a descendant of that root *before* the command is issued;
+  absolute paths outside it and flag-like paths are rejected. (Reuse the `BtrfsCliAdapter`
+  contract: absolute, non-flag, no-shell paths — `02-architecture-v2.md`.)
+- `losetup --find --show` (never a hardcoded `/dev/loop0`); mkfs only ever names an **image
+  file**, never `/dev/sd*`.
+- RAII teardown + leak check (already in `05`/`06`): unmount, `losetup -d`, delete images even
+  on panic; assert no loop device / mount leaked.
+
+**Ring 2 — container (isolates paths + mounts):**
+- A `Containerfile` with `btrfs-progs`, `perl`, `libfaketime`, Rust, and the btrbk checkout;
+  entrypoint runs the gated suite.
+- **No host bind-mounts** of the working dir or host devices — build loop images on the
+  container's ephemeral layer or a `tmpfs`. If the host disk isn't visible, a stray `rm -rf`
+  has nothing to hit.
+- Its own **mount namespace** means leaked mounts die with the container, and `/mnt/pool_a`
+  cannot collide with a real host mount.
+
+**Ring 3 — disposable VM (isolates the kernel — strongest, the choice for T2):**
+- **Hypervisor: QEMU with KVM** acceleration — real root + real kernel + *virtual* block
+  devices, so a bug that runs `mkfs /dev/vda` destroys only a virtual disk. This is the only
+  ring that neutralizes "wrong `/dev/sdX`" and host loop-device leakage, because the devices and
+  the kernel are virtualized.
+- **Driver: `virtme-ng` (`vng`)** — the tool the btrfs/`fstests` community uses; boots a
+  throwaway guest in ~1–2 s, exposes the working dir over virtiofs, runs one command, and
+  returns its exit code to the harness. The btrfs loop images are built on a **scratch virtio
+  disk** (or tmpfs) *inside* the guest, so even the guest rootfs stays clean.
+- **Local vs CI:** local iteration reuses the dev's host kernel via `vng` (near-instant boot);
+  CI pins a **kernel + minimal rootfs** under QEMU/KVM (or `vng` with a pinned kernel) for
+  reproducibility independent of the host kernel.
+- Alternatives considered and rejected: `vmtest` (fine equivalent), Vagrant/VirtualBox (heavy,
+  stateful), Firecracker (awkward for arbitrary loop/mount setup), `systemd-nspawn --ephemeral`
+  (not a real VM — shares the host kernel, so loop/mkfs accidents still hit host resources).
+
+### The gotcha that drives the design: btrfs is not userns-mountable
+A rootless/unprivileged container **cannot** `mount -t btrfs` a loop image — btrfs does not set
+`FS_USERNS_MOUNT`, so mounting it needs real `CAP_SYS_ADMIN`. "Rootless container" therefore
+does **not** solve this on its own. The two honest options for the destructive tier:
+
+| Approach | Can mount btrfs? | Blast radius if the harness has a bug |
+|----------|------------------|----------------------------------------|
+| Rootless container alone | ❌ no | n/a (can't run T2) |
+| **Privileged container** (`--cap-add SYS_ADMIN` + loop access, **no host bind-mounts**) | ✅ | shares host kernel + host loop devices; safe *only because* the host fs is not mounted in |
+| **Disposable VM** | ✅ | virtual disk only — host untouched ✅ |
+
+### Per-tier recommendation
+- **T1 (scheduler diff)** — little/no btrfs; runs in a **plain container**, or the Perl
+  `sub schedule` shim at zero privilege. Low risk.
+- **T2 (full cycle: send/receive/delete)** — run in a **disposable VM** in CI (bulletproof);
+  offer a **privileged-container** path for fast local iteration, with Ring-1 guards
+  **mandatory**.
+- **Ring 1 is on regardless** — it is the line of defense that survives a misconfigured
+  container.
+
+---
+
 ## Comparison surface & normalization (semantic equivalence)
 
 **Assert EQUAL, after normalization:**
@@ -251,9 +331,19 @@ T1 needs none of the above — only a small harness calling `domain::retention` 
 
 - This document (the spec) — done.
 - `crates/cli/tests/diff_btrbk.rs` (or a dedicated `crates/diff-tests/`) — the harness, behind
-  the same root/loopback feature/env gate as `crates/cli/tests/e2e.rs`.
+  the same root/loopback feature/env gate as `crates/cli/tests/e2e.rs`, with the Ring-1
+  `MYBTRFS_TEST_SANDBOX` gate + containment assertions at startup.
 - Shared fixture/probe helpers co-located with the e2e harness, reusing the `05 §1` helper
   names so both suites share one fixture layer.
+- **Sandbox (see Test isolation & sandboxing):**
+  - `quality/ci/Containerfile` — image with `btrfs-progs`, `perl`, `libfaketime`, Rust, and the
+    btrbk checkout; sets `MYBTRFS_TEST_SANDBOX=1`; runs the gated suite with no host
+    bind-mounts.
+  - `quality/ci/run-e2e-vm.sh` — boots a disposable QEMU/KVM guest via `virtme-ng` and runs the
+    destructive (T2) suite inside it, e.g.
+    `vng --run . --memory 2G --disk scratch.img -- env MYBTRFS_TEST_SANDBOX=1 cargo test --features e2e`.
+  - `make test-e2e` — wrapper that dispatches to the container (T1 / fast local) or the VM (T2 /
+    CI).
 
 ### btrbk config / command crib
 
@@ -291,6 +381,9 @@ TZ=UTC faketime '2026-06-22 15:31:00' ../btrbk/btrbk/btrbk -c test.conf -q run
    concrete milestone.
 4. **T2 smoke (post-CLI):** D1 full-backup green end-to-end on loopback under root,
    leak-checked teardown confirmed (no stray loop device/mount).
+5. **Sandbox self-test (Ring 1):** with `MYBTRFS_TEST_SANDBOX` unset the suite must refuse to
+   run; a fault-injected target path *outside* the `mktemp -d` root must trip the containment
+   assertion *before* any mkfs/mount/delete is issued (proves the guards fail closed).
 
 ---
 
@@ -325,3 +418,6 @@ duplicate-UUID (btrbk warns, mybtrfs refuses) — covered only by `05`, not by t
   default — a normalized, not asserted, difference (already whitelisted).
 - **Send-stream byte comparison is out of scope** (UUID/ctime-laden); D3 compares delta *size*
   ≪ full and parent-chain shape, not stream bytes.
+- **CI needs `/dev/kvm`** (nested virtualization) for the T2 VM. GitHub-hosted Ubuntu runners
+  expose KVM; on a runner without it, QEMU falls back to TCG software emulation — correct but
+  much slower. Verify KVM availability when wiring the pipeline.
