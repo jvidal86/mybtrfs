@@ -232,6 +232,22 @@ fn parse_u64(value: &str, field: &str, context: &str) -> Result<u64, PortError> 
         .map_err(|err| PortError::Parse(format!("invalid {field} '{value}' in '{context}': {err}")))
 }
 
+/// Parse the filesystem UUID from `btrfs filesystem show <path>` output (a
+/// summary line `Label: '…'  uuid: <fs-uuid>`).
+///
+/// # Errors
+/// [`PortError::Parse`] if no `uuid:` field is present or it is malformed.
+pub(crate) fn parse_filesystem_uuid(output: &str) -> Result<Uuid, PortError> {
+    output
+        .split_whitespace()
+        .skip_while(|token| *token != "uuid:")
+        .nth(1)
+        .and_then(Uuid::parse)
+        .ok_or_else(|| {
+            PortError::Parse("no filesystem uuid in `btrfs filesystem show` output".to_owned())
+        })
+}
+
 /// Extract a (mandatory) capture group as a string slice.
 fn group<'a>(caps: &Captures<'a>, index: usize, line: &str) -> Result<&'a str, PortError> {
     caps.get(index)

@@ -16,45 +16,65 @@ use mybtrfs_domain::model::{Subvolume, Uuid};
 use mybtrfs_domain::parent::ParentSelection;
 
 use crate::command::{CommandRunner, SystemCommandRunner};
+use crate::mounts::{self, MountTable, ProcMounts};
 
 /// External program name (spawned as an argv array, never via a shell).
 const BTRFS: &str = "btrfs";
 
-/// [`SubvolumeRepository`] over the real `btrfs` CLI, scoped to a single
-/// filesystem — its `fs_uuid` and `mountpoint`, as discovered by the
-/// drive-discovery adapter. Those identify the owning filesystem for every
-/// parsed [`Subvolume`], which the btrfs output itself does not carry. For a
-/// transfer, this is the **target** adapter (the received subvolume lives on the
-/// target filesystem); the source is carried in by the source [`Subvolume`].
+/// The `btrfs` CLI adapter implementing the subvolume / snapshot / transfer /
+/// delete ports. It resolves each queried path's filesystem (mountpoint +
+/// `fs_uuid`) from the mount table, so a single instance serves any directory —
+/// source and target alike — stamping every parsed [`Subvolume`] with the
+/// filesystem it actually lives on (which the btrfs output itself does not carry).
 pub struct BtrfsCliAdapter {
     runner: Box<dyn CommandRunner>,
-    fs_uuid: Uuid,
-    mountpoint: PathBuf,
+    mounts: Box<dyn MountTable>,
 }
 
 impl BtrfsCliAdapter {
-    /// Create an adapter for the filesystem identified by `fs_uuid` /
-    /// `mountpoint`, spawning the real `btrfs` binary.
+    /// Create an adapter that spawns the real `btrfs` binary and resolves each
+    /// path's filesystem from `/proc/self/mounts`.
     #[must_use]
-    pub fn new(fs_uuid: Uuid, mountpoint: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
             runner: Box::new(SystemCommandRunner),
-            fs_uuid,
-            mountpoint,
+            mounts: Box::new(ProcMounts),
         }
     }
 
-    /// The subvolume path relative to the bound mountpoint (as stamped onto a
-    /// `Subvolume`); falls back to the input path if it is not under the mountpoint.
-    fn relative_path(&self, path: &Path) -> PathBuf {
-        path.strip_prefix(&self.mountpoint)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|_| path.to_path_buf())
+    /// Resolve the btrfs filesystem containing `path`: its mountpoint (from the
+    /// mount table) and its `fs_uuid` (from `btrfs filesystem show`).
+    ///
+    /// # Errors
+    /// [`PortError`] if the mount table cannot be read, no btrfs filesystem
+    /// contains `path`, or `btrfs filesystem show` fails / cannot be parsed.
+    fn resolve(&self, path: &Path) -> Result<(PathBuf, Uuid), PortError> {
+        let entries = self.mounts.entries()?;
+        let mount = mounts::containing_btrfs_mount(&entries, path)
+            .ok_or_else(|| PortError::Command(format!("no btrfs filesystem contains {path:?}")))?;
+        let mountpoint = mount.mountpoint.clone();
+        let output = self.runner.run(
+            BTRFS,
+            &[
+                OsStr::new("filesystem"),
+                OsStr::new("show"),
+                mountpoint.as_os_str(),
+            ],
+        )?;
+        let fs_uuid = parse::parse_filesystem_uuid(&output)?;
+        Ok((mountpoint, fs_uuid))
+    }
+}
+
+impl Default for BtrfsCliAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl SubvolumeRepository for BtrfsCliAdapter {
     fn show(&self, path: &Path) -> Result<Subvolume, PortError> {
+        let (mountpoint, fs_uuid) = self.resolve(path)?;
         let output = self.runner.run(
             BTRFS,
             &[
@@ -65,13 +85,14 @@ impl SubvolumeRepository for BtrfsCliAdapter {
         )?;
         parse::parse_show(
             &output,
-            self.relative_path(path),
-            &self.fs_uuid,
-            &self.mountpoint,
+            relative_path(path, &mountpoint),
+            &fs_uuid,
+            &mountpoint,
         )
     }
 
     fn list(&self, filesystem: &Path) -> Result<Vec<Subvolume>, PortError> {
+        let (mountpoint, fs_uuid) = self.resolve(filesystem)?;
         // Display flags match btrbk: -a (all) -c (cgen) -u (uuid) -q (parent_uuid)
         // -R (received_uuid). The read-only flag is only available via -r, so a
         // second call provides it and `parse_list` merges the two.
@@ -98,7 +119,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
                 filesystem.as_os_str(),
             ],
         )?;
-        parse::parse_list(&listing, &readonly, &self.fs_uuid, &self.mountpoint)
+        parse::parse_list(&listing, &readonly, &fs_uuid, &mountpoint)
     }
 }
 
@@ -210,6 +231,26 @@ impl TransferPort for BtrfsCliAdapter {
     }
 }
 
+impl DeletePort for BtrfsCliAdapter {
+    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
+        let mut args: Vec<&OsStr> = vec![OsStr::new("subvolume"), OsStr::new("delete")];
+        if matches!(commit, DeleteCommit::Each) {
+            args.push(OsStr::new("--commit-each"));
+        }
+        args.push(path.as_os_str());
+        self.runner.run(BTRFS, &args)?;
+        Ok(())
+    }
+}
+
+/// `path` relative to `mountpoint` (as stamped onto a `Subvolume`); falls back to
+/// the input path if it is not under the mountpoint.
+fn relative_path(path: &Path, mountpoint: &Path) -> PathBuf {
+    path.strip_prefix(mountpoint)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Plausibility checks on a received subvolume (mirrors btrbk's post-receive
 /// checks): read-only, `received_uuid` set, and `parent_uuid` matching the
 /// transfer mode — absent for a full send, present for an incremental one.
@@ -237,27 +278,11 @@ fn verify_received(received: &Subvolume, full: bool) -> Result<(), PortError> {
     }
 }
 
-impl DeletePort for BtrfsCliAdapter {
-    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
-        let mut args: Vec<&OsStr> = vec![OsStr::new("subvolume"), OsStr::new("delete")];
-        if matches!(commit, DeleteCommit::Each) {
-            args.push(OsStr::new("--commit-each"));
-        }
-        args.push(path.as_os_str());
-        self.runner.run(BTRFS, &args)?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 impl BtrfsCliAdapter {
-    /// Test constructor injecting a fake command runner in place of `btrfs`.
-    fn with_runner(runner: Box<dyn CommandRunner>, fs_uuid: Uuid, mountpoint: PathBuf) -> Self {
-        Self {
-            runner,
-            fs_uuid,
-            mountpoint,
-        }
+    /// Test constructor injecting a fake command runner and mount table.
+    fn with_parts(runner: Box<dyn CommandRunner>, mounts: Box<dyn MountTable>) -> Self {
+        Self { runner, mounts }
     }
 }
 
@@ -265,6 +290,7 @@ impl BtrfsCliAdapter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::mounts::MountEntry;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -359,6 +385,26 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
     const READONLY: &str =
         "ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900\n";
 
+    /// `btrfs filesystem show` output carrying the pool's fs UUID (== `fs()`).
+    const FS_SHOW: &str = "Label: 'pool'  uuid: ffffffff-ffff-4fff-8fff-ffffffffffff\n";
+
+    /// A `MountTable` exposing the pool and the drive as btrfs mounts.
+    struct FakeMounts;
+    impl MountTable for FakeMounts {
+        fn entries(&self) -> Result<Vec<MountEntry>, PortError> {
+            Ok(vec![
+                MountEntry {
+                    mountpoint: PathBuf::from("/mnt/pool"),
+                    fstype: "btrfs".to_owned(),
+                },
+                MountEntry {
+                    mountpoint: PathBuf::from("/mnt/drive"),
+                    fstype: "btrfs".to_owned(),
+                },
+            ])
+        }
+    }
+
     /// Fake runner: returns canned output keyed on the btrfs subcommand, records
     /// every invocation (so tests can assert flags), and can simulate failure.
     struct FakeBtrfs {
@@ -397,7 +443,9 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
             }
             let has = |needle: &str| args.iter().any(|arg| *arg == OsStr::new(needle));
             // Routing doubles as a flag assertion: wrong flags fall through to Err.
-            if has("show") {
+            if has("filesystem") && has("show") {
+                Ok(FS_SHOW.to_owned())
+            } else if has("show") {
                 Ok(self.show.clone())
             } else if has("list") && has("-r") {
                 Ok(self.readonly.clone())
@@ -427,20 +475,20 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
     }
 
     fn repo(runner: FakeBtrfs) -> BtrfsCliAdapter {
-        BtrfsCliAdapter::with_runner(Box::new(runner), fs(), mountpoint())
+        BtrfsCliAdapter::with_parts(Box::new(runner), Box::new(FakeMounts))
     }
 
     /// Build an adapter over a fake whose recorded calls the test can inspect.
     fn recording_repo(fake: FakeBtrfs) -> (BtrfsCliAdapter, Rc<RefCell<Vec<Vec<String>>>>) {
         let calls = Rc::clone(&fake.calls);
         (
-            BtrfsCliAdapter::with_runner(Box::new(fake), fs(), mountpoint()),
+            BtrfsCliAdapter::with_parts(Box::new(fake), Box::new(FakeMounts)),
             calls,
         )
     }
 
     #[test]
-    fn show_returns_subvolume_tagged_with_filesystem() {
+    fn show_resolves_filesystem_and_tags_the_subvolume() {
         let sv = repo(FakeBtrfs::default())
             .show(Path::new("/mnt/pool/@data"))
             .unwrap();
@@ -448,8 +496,8 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         assert_eq!(sv.uuid, Uuid::parse("a1a1a1a1-1111-4111-8111-111111111111"));
         assert!(!sv.readonly);
         assert_eq!(sv.path, PathBuf::from("@data")); // mountpoint stripped from the queried path
-        assert_eq!(sv.fs_uuid, fs());
-        assert_eq!(sv.mountpoint, mountpoint());
+        assert_eq!(sv.fs_uuid, fs()); // resolved from `btrfs filesystem show`
+        assert_eq!(sv.mountpoint, mountpoint()); // resolved from the mount table
     }
 
     #[test]
@@ -523,7 +571,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         .send_receive(
             &source_subvol("snapshots/@data.20260622T1900"),
             &ParentSelection::default(),
-            Path::new("/mnt/pool/backups"),
+            Path::new("/mnt/drive/host"),
         )
         .unwrap();
         assert!(received.readonly);
@@ -544,7 +592,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         .send_receive(
             &source_subvol("snapshots/@data.20260622T1900"),
             &selection,
-            Path::new("/mnt/pool/backups"),
+            Path::new("/mnt/drive/host"),
         )
         .unwrap();
         assert!(received.parent_uuid.is_some());
@@ -560,7 +608,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         .send_receive(
             &source_subvol("snapshots/@data.20260622T1900"),
             &ParentSelection::default(),
-            Path::new("/mnt/pool/backups"),
+            Path::new("/mnt/drive/host"),
         )
         .unwrap_err();
         assert!(matches!(err, PortError::Verification(_)));
@@ -576,7 +624,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
             .send_receive(
                 &source_subvol("snapshots/@data.20260622T1900"),
                 &ParentSelection::default(),
-                Path::new("/mnt/pool/backups"),
+                Path::new("/mnt/drive/host"),
             )
             .unwrap_err();
         assert!(matches!(err, PortError::Verification(_)));
@@ -603,7 +651,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
             .send_receive(
                 &source_subvol("snapshots/@data.20260622T1900"),
                 &selection,
-                Path::new("/mnt/pool/backups"),
+                Path::new("/mnt/drive/host"),
             )
             .unwrap();
         // The send leg carried `-p <parent>`.
@@ -625,7 +673,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         .send_receive(
             &source_subvol("snapshots/@data.20260622T1900"),
             &ParentSelection::default(),
-            Path::new("/mnt/pool/backups"),
+            Path::new("/mnt/drive/host"),
         )
         .unwrap_err();
         assert!(matches!(err, PortError::Command(_)));

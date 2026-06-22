@@ -6,10 +6,6 @@
 //! `/proc/self/mounts` is behind the [`MountTable`] seam so the adapter stays
 //! unit-testable.
 
-// Consumed by `BtrfsCliAdapter` (resolve-per-path) in the next increment; until
-// then only the tests below exercise it.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use mybtrfs_application::ports::PortError;
