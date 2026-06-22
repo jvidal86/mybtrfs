@@ -11,7 +11,8 @@ repository.workspace = true
 mybtrfs-domain.workspace = true
 mybtrfs-application.workspace = true
 mybtrfs-adapters.workspace = true
-# clap + anyhow are added when the CLI is implemented.
+clap.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true

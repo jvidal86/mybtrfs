@@ -1,17 +1,9 @@
-//! mybtrfs binary entry point — a thin driving shell over the library crate.
-//!
-//! Builds the composition root (concrete adapters) and dispatches the parsed
-//! CLI command. See `documentation/02-architecture-v2.md`.
+//! mybtrfs binary entry point — a thin shell over the `cli` module, which is the
+//! composition root (wires concrete adapters into the use cases and dispatches).
+//! See `documentation/02-architecture-v2.md`.
 
 mod cli;
 
-mod exit_code {
-    pub const ERROR: i32 = 1;
-}
-
-fn main() {
-    // SCAFFOLD ONLY — no behavior yet. Implementation is driven by the spec in
-    // `documentation/05-e2e-test-spec.md` (SDD/TDD): red → green → refactor.
-    eprintln!("mybtrfs: not yet implemented (scaffold) — see ./documentation/");
-    std::process::exit(exit_code::ERROR);
+fn main() -> std::process::ExitCode {
+    cli::run()
 }
