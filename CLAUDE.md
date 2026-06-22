@@ -12,6 +12,14 @@ btrfs metadata (UUIDs), never from a side database.
 
 [btrbk]: https://github.com/digint/btrbk
 
+## Binding rules (auto-imported)
+
+The enforced coding & architecture rules live in **`RULES.md`**, imported below so
+they are always in context. Read them before writing code; the full rationale is in
+`documentation/04-coding-guidelines.md` and `02-architecture-v2.md`.
+
+@RULES.md
+
 ## Current state
 
 A **Cargo workspace** under active **Spec-Driven / Test-Driven** development. The
@@ -68,6 +76,9 @@ their originals.**
 - **`04-coding-guidelines.md`** — Rust + clean-code rules to follow.
 - **`05-e2e-test-spec.md`** — the end-to-end behavioral spec (black-box, SDD/TDD),
   with a traceability matrix back to the §6 invariants.
+- **`06-differential-oracle-test-spec.md`** — differential ("back-to-back")
+  conformance test that runs btrbk (the reference oracle) and mybtrfs over the same
+  loopback fixture and compares resulting btrfs state (design-only until the CLI lands).
 - `03-review-and-corrections.md` — the review trail (history).
 
 ## Reference implementation
