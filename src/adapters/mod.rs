@@ -4,8 +4,8 @@
 //! module. See `documentation/02-architecture-v2.md` §3.
 
 pub mod btrfs_cli;
-pub mod local_fs;
-pub mod drive_discovery;
 pub mod clock;
-pub mod prompter;
+pub mod drive_discovery;
 pub mod journal;
+pub mod local_fs;
+pub mod prompter;

@@ -2,6 +2,6 @@
 //! never on a concrete adapter. See `documentation/02-architecture-v2.md` §3.
 
 pub mod backup;
-pub mod retention;
-pub mod restore;
 pub mod inventory;
+pub mod restore;
+pub mod retention;
