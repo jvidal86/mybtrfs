@@ -9,7 +9,9 @@ pub(crate) mod parse;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use mybtrfs_application::ports::{PortError, SnapshotPort, SubvolumeRepository};
+use mybtrfs_application::ports::{
+    DeleteCommit, DeletePort, PortError, SnapshotPort, SubvolumeRepository,
+};
 use mybtrfs_domain::model::{Subvolume, Uuid};
 
 use crate::command::{CommandRunner, SystemCommandRunner};
@@ -140,6 +142,18 @@ impl SnapshotPort for BtrfsCliAdapter {
     }
 }
 
+impl DeletePort for BtrfsCliAdapter {
+    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
+        let mut args: Vec<&OsStr> = vec![OsStr::new("subvolume"), OsStr::new("delete")];
+        if matches!(commit, DeleteCommit::Each) {
+            args.push(OsStr::new("--commit-each"));
+        }
+        args.push(path.as_os_str());
+        self.runner.run(BTRFS, &args)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 impl BtrfsCliAdapter {
     /// Test constructor injecting a fake command runner in place of `btrfs`.
@@ -226,8 +240,8 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
                 Ok(self.readonly.clone())
             } else if has("list") && has("-c") && has("-u") && has("-q") && has("-R") {
                 Ok(self.list.clone())
-            } else if has("snapshot") {
-                Ok(String::new()) // `btrfs subvolume snapshot` prints only a success line
+            } else if has("snapshot") || has("delete") {
+                Ok(String::new()) // snapshot/delete print only a success line, no parsed output
             } else {
                 Err(PortError::Command(format!(
                     "unexpected btrfs invocation: {args:?}"
@@ -313,5 +327,55 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
             )
             .unwrap();
         assert!(!sv.readonly);
+    }
+
+    /// Records the argv of each invocation so tests can assert flags.
+    struct RecordingRunner {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, _program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+            self.calls.borrow_mut().push(
+                args.iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            );
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn delete_passes_commit_each_only_when_requested() {
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+        let adapter = BtrfsCliAdapter::with_runner(
+            Box::new(RecordingRunner {
+                calls: std::rc::Rc::clone(&calls),
+            }),
+            fs(),
+            mountpoint(),
+        );
+        adapter
+            .delete(Path::new("/mnt/pool/snap"), DeleteCommit::Deferred)
+            .unwrap();
+        adapter
+            .delete(Path::new("/mnt/pool/snap"), DeleteCommit::Each)
+            .unwrap();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 2);
+        assert!(!recorded[0].iter().any(|a| a.as_str() == "--commit-each"));
+        assert!(recorded[1].iter().any(|a| a.as_str() == "--commit-each"));
+    }
+
+    #[test]
+    fn delete_failure_propagates() {
+        let err = repo(FakeBtrfs {
+            fail: true,
+            ..FakeBtrfs::default()
+        })
+        .delete(Path::new("/mnt/pool/snap"), DeleteCommit::Deferred)
+        .unwrap_err();
+        assert!(matches!(err, PortError::Command(_)));
     }
 }
