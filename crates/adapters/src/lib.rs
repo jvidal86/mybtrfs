@@ -5,7 +5,12 @@
 
 pub(crate) mod btrfs_cli;
 pub(crate) mod clock;
+pub(crate) mod command;
 pub(crate) mod drive_discovery;
 pub(crate) mod journal;
 pub(crate) mod local_fs;
 pub(crate) mod prompter;
+
+/// The btrfs-CLI-backed subvolume repository; the composition root constructs it
+/// with a discovered filesystem's UUID and mountpoint.
+pub use btrfs_cli::BtrfsCliAdapter;

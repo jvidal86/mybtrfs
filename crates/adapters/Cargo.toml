@@ -10,8 +10,9 @@ repository.workspace = true
 [dependencies]
 mybtrfs-domain.workspace = true
 mybtrfs-application.workspace = true
-# External deps (serde/serde_json/chrono/anyhow/thiserror) are added as each
-# adapter is implemented.
+regex.workspace = true
+# Other external deps (serde/serde_json/chrono/anyhow/thiserror) are added as
+# each adapter is implemented.
 
 [lints]
 workspace = true
