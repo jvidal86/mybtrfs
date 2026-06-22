@@ -44,14 +44,19 @@ in `CLAUDE.md` § "Invariants any implementation MUST preserve" and `02` §6.
     one-line justification.
 14. **No raw exit-code literals** — route through the central `exit_code` table.
 15. **`unsafe_code = "forbid"`** (workspace lint); edition 2024.
+16. **Boundary parsers reject malformed input.** At an adapter boundary, map a tool's
+    sentinel/absence to `None`/default, but treat a *present-but-malformed* field as a
+    parse **error** — never silently coerce it (e.g. a garbled `received_uuid` → `None`
+    forges the garbled-receive signal invariant #1 depends on). "Parse, don't validate"
+    (`04` §0.3).
 
 ## Gates before any commit
 
-16. `cargo test --workspace` green.
-17. `cargo clippy --workspace --all-targets` clean **with the pedantic subset**
+17. `cargo test --workspace` green.
+18. `cargo clippy --workspace --all-targets` clean **with the pedantic subset**
     (`missing_panics_doc`, `must_use_candidate`, `needless_pass_by_value`,
     `redundant_closure_for_method_calls`, `explicit_iter_loop`).
-18. `cargo fmt --check` clean.
-19. Builds on the pinned **MSRV** (`rust-version` in `[workspace.package]`); bump it
+19. `cargo fmt --check` clean.
+20. Builds on the pinned **MSRV** (`rust-version` in `[workspace.package]`); bump it
     deliberately, never incidentally.
-20. **TDD:** the increment started with a failing test (red → green → refactor).
+21. **TDD:** the increment started with a failing test (red → green → refactor).

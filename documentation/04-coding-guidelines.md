@@ -50,8 +50,11 @@
 - **Enums for states and choices.** Replace boolean parameters with intent-named
   enums — `snapshot(Readonly::Yes)` reads better and resists call-site mistakes
   than `snapshot(true)`.
-- **`Option`, not sentinels.** Mirror btrfs's `"-"` as `Option<Uuid>` at the
-  parse boundary; logic never compares against `"-"`.
+- **`Option`, not sentinels.** Mirror btrfs's `"-"` (and an absent field) as
+  `Option<Uuid>` at the parse boundary; logic never compares against `"-"`. But a
+  *present-but-malformed* field is a parse **error**, never silently coerced to
+  `None`/default — silently dropping a garbled `received_uuid` would forge the
+  "garbled receive" signal that invariant #1 depends on.
 - **Builders** for constructors with many optional fields; avoid long positional
   argument lists.
 - Derive deliberately (`Debug` almost always; `Clone`/`PartialEq` when needed).
