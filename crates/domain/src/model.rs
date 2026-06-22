@@ -73,9 +73,13 @@ fn is_canonical_uuid(value: &str) -> bool {
 /// relationship tracking; the btrfs `"-"` sentinel is represented as `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subvolume {
+    /// btrfs subvolume id (unique within a filesystem, assigned by the kernel).
     pub id: u64,
+    /// This subvolume's own UUID; `None` when btrfs reports `"-"`.
     pub uuid: Option<Uuid>,
+    /// UUID of the parent snapshot this was snapshotted from; drives lineage tracking.
     pub parent_uuid: Option<Uuid>,
+    /// UUID of the source subvolume this was received from; set by `btrfs receive`, absent on native snapshots.
     pub received_uuid: Option<Uuid>,
     /// Current generation.
     pub generation: u64,

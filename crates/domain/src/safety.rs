@@ -22,7 +22,9 @@ use std::collections::HashSet;
 /// A source snapshot and its correlated backups on the target.
 #[derive(Debug)]
 pub struct CommonPair<'a> {
+    /// The source-side snapshot; has at least one correlated backup on the target.
     pub snapshot: &'a Subvolume,
+    /// Correlated backup copies of `snapshot` present on the target filesystem.
     pub backups: Vec<&'a Subvolume>,
 }
 
