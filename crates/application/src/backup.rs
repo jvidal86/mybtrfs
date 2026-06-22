@@ -9,32 +9,38 @@ use std::path::Path;
 
 use mybtrfs_domain::model::Subvolume;
 use mybtrfs_domain::naming::{TimestampFormat, make_name, next_free_name};
+use mybtrfs_domain::parent::ParentSelection;
 
-use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository};
+use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository, TransferPort};
 
 /// Orchestrates the backup operations over the driven ports. Phase 1 covers
-/// `snapshot`; `run`/`resume` (send/receive + prune) follow in later increments.
+/// `snapshot` and the full-backup `run`; incremental parent resolution and
+/// pruning follow in later increments.
 pub struct BackupService<'a> {
     clock: &'a dyn ClockPort,
     repo: &'a dyn SubvolumeRepository,
     snapshots: &'a dyn SnapshotPort,
+    transfer: &'a dyn TransferPort,
     format: TimestampFormat,
 }
 
 impl<'a> BackupService<'a> {
     /// Construct a service over the injected clock, subvolume repository,
-    /// snapshot port, and the timestamp format used for snapshot names.
+    /// snapshot and transfer ports, and the timestamp format used for snapshot
+    /// names.
     #[must_use]
     pub fn new(
         clock: &'a dyn ClockPort,
         repo: &'a dyn SubvolumeRepository,
         snapshots: &'a dyn SnapshotPort,
+        transfer: &'a dyn TransferPort,
         format: TimestampFormat,
     ) -> Self {
         Self {
             clock,
             repo,
             snapshots,
+            transfer,
             format,
         }
     }
@@ -68,6 +74,28 @@ impl<'a> BackupService<'a> {
         let dest = snapshot_dir.join(next_free_name(&base, &leaves));
         self.snapshots.create_readonly(source, &dest)
     }
+
+    /// Full backup cycle (Phase 1): create a read-only snapshot of `source`, then
+    /// send/receive it into `target_dir` as a **full** transfer (no parent). The
+    /// transfer port verifies the received subvolume (read-only, `received_uuid`
+    /// set, `parent_uuid` unset for a full backup). Returns the verified backup.
+    ///
+    /// # Errors
+    /// Propagates any [`PortError`] from the repository, snapshot, or transfer port.
+    pub fn run(
+        &self,
+        source: &Path,
+        snapshot_dir: &Path,
+        basename: &str,
+        target_dir: &Path,
+    ) -> Result<Subvolume, PortError> {
+        let snapshot = self.snapshot(source, snapshot_dir, basename)?;
+        // Phase 1: full send — incremental parent / clone-source resolution is
+        // a later increment.
+        let selection = ParentSelection::default();
+        self.transfer
+            .send_receive(&snapshot, &selection, target_dir)
+    }
 }
 
 #[cfg(test)]
@@ -80,9 +108,10 @@ mod tests {
 
     use mybtrfs_domain::model::{Subvolume, Uuid};
     use mybtrfs_domain::naming::TimestampFormat;
+    use mybtrfs_domain::parent::ParentSelection;
 
     use crate::backup::BackupService;
-    use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository};
+    use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository, TransferPort};
 
     /// A clock fixed at a single instant.
     struct FixedClock(DateTime<FixedOffset>);
@@ -168,12 +197,58 @@ mod tests {
         }
     }
 
+    /// A `TransferPort` recording its calls and returning a verified full backup.
+    #[derive(Default)]
+    struct RecordingTransfer {
+        calls: RefCell<Vec<(Subvolume, ParentSelection, PathBuf)>>,
+    }
+    impl RecordingTransfer {
+        fn calls(&self) -> Vec<(Subvolume, ParentSelection, PathBuf)> {
+            self.calls.borrow().clone()
+        }
+    }
+    impl TransferPort for RecordingTransfer {
+        fn send_receive(
+            &self,
+            source: &Subvolume,
+            selection: &ParentSelection,
+            target_dir: &Path,
+        ) -> Result<Subvolume, PortError> {
+            self.calls.borrow_mut().push((
+                source.clone(),
+                selection.clone(),
+                target_dir.to_path_buf(),
+            ));
+            Ok(received_backup(target_dir, source))
+        }
+    }
+
+    /// A verified full backup as `btrfs receive` + verification would yield:
+    /// read-only, with a `received_uuid`, and no `parent_uuid`.
+    fn received_backup(target_dir: &Path, source: &Subvolume) -> Subvolume {
+        let leaf = source.path.file_name().expect("snapshot has a leaf name");
+        Subvolume {
+            id: 400,
+            uuid: Uuid::parse("33333333-3333-3333-3333-333333333333"),
+            parent_uuid: None,
+            received_uuid: source.uuid.clone(),
+            generation: 20,
+            cgen: 20,
+            readonly: true,
+            path: target_dir.join(leaf),
+            fs_uuid: Uuid::parse("44444444-4444-4444-4444-444444444444").expect("valid uuid"),
+            mountpoint: PathBuf::from("/mnt/drive"),
+        }
+    }
+
     #[test]
     fn snapshot_creates_readonly_snapshot_named_with_timestamp() {
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         let repo = FakeRepo::default();
         let snapshots = RecordingSnapshot::default();
-        let service = BackupService::new(&clock, &repo, &snapshots, TimestampFormat::Long);
+        let transfer = RecordingTransfer::default();
+        let service =
+            BackupService::new(&clock, &repo, &snapshots, &transfer, TimestampFormat::Long);
 
         let created = service
             .snapshot(
@@ -206,7 +281,9 @@ mod tests {
             subvols: vec![existing_snapshot(".mybtrfs_snapshots/home.20240102T1531")],
         };
         let snapshots = RecordingSnapshot::default();
-        let service = BackupService::new(&clock, &repo, &snapshots, TimestampFormat::Long);
+        let transfer = RecordingTransfer::default();
+        let service =
+            BackupService::new(&clock, &repo, &snapshots, &transfer, TimestampFormat::Long);
 
         service
             .snapshot(
@@ -224,5 +301,51 @@ mod tests {
                 PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531_1"),
             )]
         );
+    }
+
+    #[test]
+    fn run_snapshots_then_full_send_receives_to_target() {
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        let repo = FakeRepo::default();
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let service =
+            BackupService::new(&clock, &repo, &snapshots, &transfer, TimestampFormat::Long);
+
+        let backup = service
+            .run(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+                Path::new("/mnt/drive/host"),
+            )
+            .expect("run succeeds");
+
+        // A read-only snapshot is created first.
+        assert_eq!(
+            snapshots.readonly_calls(),
+            vec![(
+                PathBuf::from("/mnt/pool/home"),
+                PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531"),
+            )]
+        );
+        // Then a FULL send/receive of that snapshot into the target dir.
+        let calls = transfer.calls();
+        assert_eq!(calls.len(), 1);
+        let (sent, selection, target) = &calls[0];
+        assert_eq!(
+            sent.path,
+            PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531")
+        );
+        assert!(
+            selection.parent.is_none(),
+            "Phase 1 is a full send (no parent)"
+        );
+        assert!(selection.clone_sources.is_empty());
+        assert_eq!(target, &PathBuf::from("/mnt/drive/host"));
+        // The returned backup is verified: read-only, received_uuid set, full (no parent).
+        assert!(backup.readonly);
+        assert!(backup.received_uuid.is_some());
+        assert!(backup.parent_uuid.is_none());
     }
 }
