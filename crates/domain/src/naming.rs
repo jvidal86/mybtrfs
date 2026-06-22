@@ -11,6 +11,14 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use regex::Regex;
 use std::sync::OnceLock;
 
+/// strftime patterns for the three timestamp formats.
+const SHORT_FORMAT: &str = "%Y%m%d";
+const LONG_FORMAT: &str = "%Y%m%dT%H%M";
+const LONG_ISO_FORMAT: &str = "%Y%m%dT%H%M%S%z";
+
+const SECONDS_PER_HOUR: i32 = 3600;
+const SECONDS_PER_MINUTE: i32 = 60;
+
 /// Timestamp granularity used as the name postfix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimestampFormat {
@@ -41,9 +49,9 @@ pub struct ParsedName {
 /// Format the timestamp postfix for `dt` in the requested format.
 pub fn format_timestamp(dt: DateTime<FixedOffset>, fmt: TimestampFormat) -> String {
     match fmt {
-        TimestampFormat::Short => dt.format("%Y%m%d").to_string(),
-        TimestampFormat::Long => dt.format("%Y%m%dT%H%M").to_string(),
-        TimestampFormat::LongIso => dt.format("%Y%m%dT%H%M%S%z").to_string(),
+        TimestampFormat::Short => dt.format(SHORT_FORMAT).to_string(),
+        TimestampFormat::Long => dt.format(LONG_FORMAT).to_string(),
+        TimestampFormat::LongIso => dt.format(LONG_ISO_FORMAT).to_string(),
     }
 }
 
@@ -53,9 +61,9 @@ pub fn make_name(basename: &str, dt: DateTime<FixedOffset>, fmt: TimestampFormat
     format!("{basename}.{}", format_timestamp(dt, fmt))
 }
 
-/// Append a collision counter to a generated name: `<name>_<n>`.
-pub fn with_counter(name: &str, n: u32) -> String {
-    format!("{name}_{n}")
+/// Append a collision counter to a generated name: `<name>_<counter>`.
+pub fn with_counter(name: &str, counter: u32) -> String {
+    format!("{name}_{counter}")
 }
 
 #[allow(clippy::expect_used)] // compile-time-constant pattern; cannot fail at runtime
@@ -95,7 +103,7 @@ pub fn parse_name(name: &str) -> Option<ParsedName> {
     let offset = match group("z") {
         None => None,
         Some("Z") => Some(FixedOffset::east_opt(0)?),
-        Some(z) => Some(parse_offset(z)?),
+        Some(offset_text) => Some(parse_offset(offset_text)?),
     };
 
     Some(ParsedName {
@@ -108,15 +116,15 @@ pub fn parse_name(name: &str) -> Option<ParsedName> {
 }
 
 /// Parse an `±hhmm` offset (e.g. `+0200`, `-0500`) into a [`FixedOffset`].
-fn parse_offset(z: &str) -> Option<FixedOffset> {
-    let sign = match z.as_bytes().first()? {
+fn parse_offset(text: &str) -> Option<FixedOffset> {
+    let sign = match text.as_bytes().first()? {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    let hours: i32 = z.get(1..3)?.parse().ok()?;
-    let minutes: i32 = z.get(3..5)?.parse().ok()?;
-    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+    let hours: i32 = text.get(1..3)?.parse().ok()?;
+    let minutes: i32 = text.get(3..5)?.parse().ok()?;
+    FixedOffset::east_opt(sign * (hours * SECONDS_PER_HOUR + minutes * SECONDS_PER_MINUTE))
 }
 
 #[cfg(test)]

@@ -16,6 +16,10 @@
 use chrono::{Datelike, NaiveDateTime, TimeDelta, Timelike};
 use std::collections::BTreeMap;
 
+const HOURS_PER_DAY: i64 = 24;
+const DAYS_PER_WEEK: i64 = 7;
+const MONTHS_PER_YEAR: i64 = 12;
+
 /// A calendar unit for `preserve_min`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
@@ -114,71 +118,71 @@ pub fn schedule<T>(
     // Ascending by absolute time, then by collision counter (oldest first).
     entries.sort_by(|a, b| a.instant.cmp(&b.instant).then(a.nn.cmp(&b.nn)));
 
-    let now_soh = start_of_hour(now);
+    let now_start_of_hour = start_of_hour(now);
     let deltas: Vec<Deltas> = entries
         .iter()
-        .map(|e| compute_deltas(e, now, now_soh, policy))
+        .map(|entry| compute_deltas(entry, now, now_start_of_hour, policy))
         .collect();
 
-    let n = entries.len();
-    let mut preserve = vec![false; n];
+    let count = entries.len();
+    let mut preserve = vec![false; count];
 
     // preserve_min floor + first-of-hour buckets (oldest wins via insertion order).
     let mut first_hours: BTreeMap<i64, usize> = BTreeMap::new();
-    for (i, d) in deltas.iter().enumerate() {
-        if min_covers(policy, d) {
-            preserve[i] = true;
+    for (idx, delta) in deltas.iter().enumerate() {
+        if min_covers(policy, delta) {
+            preserve[idx] = true;
         }
-        first_hours.entry(d.hours).or_insert(i);
+        first_hours.entry(delta.hours).or_insert(idx);
     }
-    if matches!(policy.preserve_min, PreserveMin::Latest) && n > 0 {
-        preserve[n - 1] = true;
+    if matches!(policy.preserve_min, PreserveMin::Latest) && count > 0 {
+        preserve[count - 1] = true;
     }
 
     // Cascade: each tier preserves its representatives (within its count) and
     // rolls the oldest representative up into the next coarser tier. The roll-up
     // happens unconditionally (independent of whether this tier preserves).
     let mut first_days: BTreeMap<i64, usize> = BTreeMap::new();
-    for &i in first_hours.values().rev() {
-        if covers(policy.hourly, deltas[i].hours) {
-            preserve[i] = true;
+    for &idx in first_hours.values().rev() {
+        if covers(policy.hourly, deltas[idx].hours) {
+            preserve[idx] = true;
         }
-        first_days.entry(deltas[i].days).or_insert(i);
+        first_days.entry(deltas[idx].days).or_insert(idx);
     }
     let mut first_weeks: BTreeMap<i64, usize> = BTreeMap::new();
-    for &i in first_days.values().rev() {
-        if covers(policy.daily, deltas[i].days) {
-            preserve[i] = true;
+    for &idx in first_days.values().rev() {
+        if covers(policy.daily, deltas[idx].days) {
+            preserve[idx] = true;
         }
-        first_weeks.entry(deltas[i].weeks).or_insert(i);
+        first_weeks.entry(deltas[idx].weeks).or_insert(idx);
     }
     let mut first_weekly_months: BTreeMap<i64, usize> = BTreeMap::new();
-    for &i in first_weeks.values().rev() {
-        if covers(policy.weekly, deltas[i].weeks) {
-            preserve[i] = true;
+    for &idx in first_weeks.values().rev() {
+        if covers(policy.weekly, deltas[idx].weeks) {
+            preserve[idx] = true;
         }
-        first_weekly_months.entry(deltas[i].months).or_insert(i);
+        first_weekly_months.entry(deltas[idx].months).or_insert(idx);
     }
     let mut first_monthly_years: BTreeMap<i64, usize> = BTreeMap::new();
-    for &i in first_weekly_months.values().rev() {
-        if covers(policy.monthly, deltas[i].months) {
-            preserve[i] = true;
+    for &idx in first_weekly_months.values().rev() {
+        if covers(policy.monthly, deltas[idx].months) {
+            preserve[idx] = true;
         }
-        first_monthly_years.entry(deltas[i].years).or_insert(i);
+        first_monthly_years.entry(deltas[idx].years).or_insert(idx);
     }
-    for &i in first_monthly_years.values().rev() {
-        if covers(policy.yearly, deltas[i].years) {
-            preserve[i] = true;
+    for &idx in first_monthly_years.values().rev() {
+        if covers(policy.yearly, deltas[idx].years) {
+            preserve[idx] = true;
         }
     }
 
     let mut keep = Vec::new();
     let mut drop = Vec::new();
-    for (i, e) in entries.into_iter().enumerate() {
-        if preserve[i] {
-            keep.push(e.payload);
+    for (idx, entry) in entries.into_iter().enumerate() {
+        if preserve[idx] {
+            keep.push(entry.payload);
         } else {
-            drop.push(e.payload);
+            drop.push(entry.payload);
         }
     }
     Schedule {
@@ -192,45 +196,45 @@ fn start_of_hour(dt: NaiveDateTime) -> NaiveDateTime {
 }
 
 fn compute_deltas<T>(
-    e: &DatedEntry<T>,
+    entry: &DatedEntry<T>,
     now: NaiveDateTime,
-    now_soh: NaiveDateTime,
+    now_start_of_hour: NaiveDateTime,
     policy: &RetentionPolicy,
 ) -> Deltas {
-    let tm = e.local;
+    let local = entry.local;
 
-    let mut dh_from_hod = i64::from(tm.hour())
-        - if e.has_exact_time {
+    let mut hours_from_day_start = i64::from(local.hour())
+        - if entry.has_exact_time {
             i64::from(policy.hour_of_day)
         } else {
             0
         };
-    let mut dd_from_eow = i64::from(tm.weekday().num_days_from_sunday())
+    let mut days_from_week_start = i64::from(local.weekday().num_days_from_sunday())
         - i64::from(policy.day_of_week.num_days_from_sunday());
-    if dh_from_hod < 0 {
-        dh_from_hod += 24;
-        dd_from_eow -= 1;
+    if hours_from_day_start < 0 {
+        hours_from_day_start += HOURS_PER_DAY;
+        days_from_week_start -= 1;
     }
-    if dd_from_eow < 0 {
-        dd_from_eow += 7;
+    if days_from_week_start < 0 {
+        days_from_week_start += DAYS_PER_WEEK;
     }
 
     // Months/years are anchored on the first `day_of_week` of the period.
-    let mut month0 = i64::from(tm.month0());
-    let mut year = i64::from(tm.year());
-    if i64::from(tm.day()) <= dd_from_eow {
+    let mut month0 = i64::from(local.month0());
+    let mut year = i64::from(local.year());
+    if i64::from(local.day()) <= days_from_week_start {
         month0 -= 1;
         if month0 < 0 {
-            month0 = 11;
+            month0 = MONTHS_PER_YEAR - 1;
             year -= 1;
         }
     }
 
-    let hours = (now_soh - start_of_hour(tm)).num_hours();
-    let days = (hours + dh_from_hod) / 24;
-    let weeks = (days + dd_from_eow) / 7;
+    let hours = (now_start_of_hour - start_of_hour(local)).num_hours();
+    let days = (hours + hours_from_day_start) / HOURS_PER_DAY;
+    let weeks = (days + days_from_week_start) / DAYS_PER_WEEK;
     let years = i64::from(now.year()) - year;
-    let months = years * 12 + (i64::from(now.month0()) - month0);
+    let months = years * MONTHS_PER_YEAR + (i64::from(now.month0()) - month0);
 
     Deltas {
         hours,
@@ -245,25 +249,25 @@ fn compute_deltas<T>(
 fn covers(tier: Option<TierCount>, delta: i64) -> bool {
     match tier {
         Some(TierCount::All) => true,
-        Some(TierCount::Count(n)) => n > 0 && delta <= i64::from(n),
+        Some(TierCount::Count(count)) => count > 0 && delta <= i64::from(count),
         None => false,
     }
 }
 
 /// Whether the `preserve_min` floor covers an entry with these deltas.
-fn min_covers(policy: &RetentionPolicy, d: &Deltas) -> bool {
+fn min_covers(policy: &RetentionPolicy, deltas: &Deltas) -> bool {
     match policy.preserve_min {
         PreserveMin::All => true,
         PreserveMin::None | PreserveMin::Latest => false,
-        PreserveMin::Within(n, unit) => {
+        PreserveMin::Within(count, unit) => {
             let delta = match unit {
-                Unit::Hours => d.hours,
-                Unit::Days => d.days,
-                Unit::Weeks => d.weeks,
-                Unit::Months => d.months,
-                Unit::Years => d.years,
+                Unit::Hours => deltas.hours,
+                Unit::Days => deltas.days,
+                Unit::Weeks => deltas.weeks,
+                Unit::Months => deltas.months,
+                Unit::Years => deltas.years,
             };
-            delta <= i64::from(n)
+            delta <= i64::from(count)
         }
     }
 }

@@ -21,12 +21,15 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Uuid(String);
 
+/// Group lengths of a canonical UUID (`8-4-4-4-12` hex).
+const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
+
 impl Uuid {
     /// Parse a canonical UUID, normalizing to lowercase. `None` if malformed.
-    pub fn parse(s: &str) -> Option<Uuid> {
-        let s = s.trim();
-        if is_canonical_uuid(s) {
-            Some(Uuid(s.to_ascii_lowercase()))
+    pub fn parse(value: &str) -> Option<Uuid> {
+        let value = value.trim();
+        if is_canonical_uuid(value) {
+            Some(Uuid(value.to_ascii_lowercase()))
         } else {
             None
         }
@@ -34,12 +37,12 @@ impl Uuid {
 
     /// Interpret a UUID field from btrfs output: the `"-"` sentinel (and empty)
     /// map to `None`; anything else is parsed (malformed also yields `None`).
-    pub fn from_btrfs(s: &str) -> Option<Uuid> {
-        let t = s.trim();
-        if t.is_empty() || t == "-" {
+    pub fn from_btrfs(value: &str) -> Option<Uuid> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == "-" {
             None
         } else {
-            Uuid::parse(t)
+            Uuid::parse(trimmed)
         }
     }
 
@@ -54,14 +57,12 @@ impl std::fmt::Display for Uuid {
     }
 }
 
-fn is_canonical_uuid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts
-            .iter()
-            .zip(groups)
-            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
+fn is_canonical_uuid(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    parts.len() == UUID_GROUP_LENGTHS.len()
+        && parts.iter().zip(UUID_GROUP_LENGTHS).all(|(part, len)| {
+            part.len() == len && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 /// A btrfs subvolume as mybtrfs models it. The three UUID fields drive all

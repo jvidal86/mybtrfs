@@ -175,6 +175,11 @@
 
 ## 11. Clean-code general (kept brief — the above is the project-specific part)
 
+- **No magic numbers or repeated literals.** Give meaningful values a named
+  `const` (e.g. `HOURS_PER_DAY`, `MONTHS_PER_YEAR`, `UUID_GROUP_LENGTHS`, the
+  strftime patterns) and name function parameters/locals for intent — avoid bare
+  literals and single-letter names in non-trivial code (idiomatic short binders
+  like a loop `idx` or a `|s| s.id` closure are fine).
 - **DRY**, but prefer a little duplication over the *wrong* abstraction; extract
   only when the shared shape is real and stable. **YAGNI** — build for the four
   phases, not imagined futures.
