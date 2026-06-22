@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 mybtrfs-domain.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
