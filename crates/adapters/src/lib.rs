@@ -14,3 +14,7 @@ pub(crate) mod prompter;
 /// The btrfs-CLI-backed subvolume repository; the composition root constructs it
 /// with a discovered filesystem's UUID and mountpoint.
 pub use btrfs_cli::BtrfsCliAdapter;
+
+/// Clock adapters: [`SystemClock`] (real wall clock) and [`FixedClock`]
+/// (deterministic, for tests / reproducible runs).
+pub use clock::{FixedClock, SystemClock};
