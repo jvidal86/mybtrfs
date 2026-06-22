@@ -9,10 +9,12 @@ pub(crate) mod command;
 pub(crate) mod drive_discovery;
 pub(crate) mod journal;
 pub(crate) mod local_fs;
+pub(crate) mod mounts;
 pub(crate) mod prompter;
 
-/// The btrfs-CLI-backed subvolume repository; the composition root constructs it
-/// with a discovered filesystem's UUID and mountpoint.
+/// The btrfs-CLI-backed adapter (subvolume / snapshot / transfer / delete ports);
+/// resolves each path's filesystem from the mount table, so one instance serves
+/// both source and target.
 pub use btrfs_cli::BtrfsCliAdapter;
 
 /// Clock adapters: [`SystemClock`] (real wall clock) and [`FixedClock`]
