@@ -1,8 +1,459 @@
 //! `RetentionScheduler` — the pure hourly→daily→weekly→monthly→yearly cascade.
 //!
-//! Inputs: timestamps, policy, reference time **and timezone** (because
-//! `short`/`long` timestamps are local-time). Output: `(preserve, delete)`.
-//! First/oldest-of-period wins and rolls up into the next tier. Parallels btrbk
-//! `sub schedule`. Run once per set (snapshots vs backups) with its own policy.
-//
-// TODO (Phase 3).
+//! Inputs: dated entries (each carrying its absolute instant for sorting and its
+//! wall-clock time *in the reference timezone* for calendar math), a
+//! [`RetentionPolicy`], and the reference `now` (also reference-tz wall-clock).
+//! Output: a [`Schedule`] partitioning the payloads into preserve/delete.
+//!
+//! Faithful to btrbk `sub schedule`: the first/oldest entry of each period is the
+//! representative and rolls up into the next tier; `preserve_min` is a separate
+//! floor. Timezone is applied by the caller when building [`DatedEntry`] (so this
+//! module is pure and tz-independent). Policy *parsing* (CLI strings) is a later
+//! increment.
+//!
+//! TDD: the tests below are the spec, written first. Implementation follows.
+
+use chrono::{Datelike, NaiveDateTime, TimeDelta, Timelike};
+use std::collections::BTreeMap;
+
+/// A calendar unit for `preserve_min`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Hours,
+    Days,
+    Weeks,
+    Months,
+    Years,
+}
+
+/// The minimum-keep floor: a window in which *all* entries are preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreserveMin {
+    /// Preserve everything (btrbk default).
+    All,
+    /// Always preserve the single newest entry.
+    Latest,
+    /// No floor — preservation is decided solely by the tier schedule.
+    None,
+    /// Preserve everything within the last N units.
+    Within(u32, Unit),
+}
+
+/// How many of a tier (hourly/daily/…) to preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierCount {
+    /// Preserve all representatives of this tier.
+    All,
+    /// Preserve representatives for the last N periods.
+    Count(u32),
+}
+
+/// A retention policy for one set (snapshots *or* backups).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub preserve_min: PreserveMin,
+    pub hourly: Option<TierCount>,
+    pub daily: Option<TierCount>,
+    pub weekly: Option<TierCount>,
+    pub monthly: Option<TierCount>,
+    pub yearly: Option<TierCount>,
+    /// Hour (0–23) at which a "day" begins.
+    pub hour_of_day: u32,
+    /// Weekday on which a "week" begins (also anchors months/years).
+    pub day_of_week: chrono::Weekday,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            preserve_min: PreserveMin::All,
+            hourly: None,
+            daily: None,
+            weekly: None,
+            monthly: None,
+            yearly: None,
+            hour_of_day: 0,
+            day_of_week: chrono::Weekday::Sun,
+        }
+    }
+}
+
+/// An entry to be scheduled. `instant` is the absolute time (for ordering);
+/// `local` is the wall-clock time in the reference timezone (for calendar math).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatedEntry<T> {
+    pub instant: i64,
+    pub local: NaiveDateTime,
+    pub has_exact_time: bool,
+    pub nn: u32,
+    pub payload: T,
+}
+
+/// The scheduler's verdict: payloads partitioned into preserve/delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schedule<T> {
+    pub preserve: Vec<T>,
+    pub delete: Vec<T>,
+}
+
+/// Calendar deltas of an entry relative to `now` (all "ago", in their unit).
+struct Deltas {
+    hours: i64,
+    days: i64,
+    weeks: i64,
+    months: i64,
+    years: i64,
+}
+
+/// Classify each entry as preserve or delete per `policy`, relative to `now`.
+pub fn schedule<T>(
+    mut entries: Vec<DatedEntry<T>>,
+    policy: &RetentionPolicy,
+    now: NaiveDateTime,
+) -> Schedule<T> {
+    // Ascending by absolute time, then by collision counter (oldest first).
+    entries.sort_by(|a, b| a.instant.cmp(&b.instant).then(a.nn.cmp(&b.nn)));
+
+    let now_soh = start_of_hour(now);
+    let deltas: Vec<Deltas> = entries
+        .iter()
+        .map(|e| compute_deltas(e, now, now_soh, policy))
+        .collect();
+
+    let n = entries.len();
+    let mut preserve = vec![false; n];
+
+    // preserve_min floor + first-of-hour buckets (oldest wins via insertion order).
+    let mut first_hours: BTreeMap<i64, usize> = BTreeMap::new();
+    for (i, d) in deltas.iter().enumerate() {
+        if min_covers(policy, d) {
+            preserve[i] = true;
+        }
+        first_hours.entry(d.hours).or_insert(i);
+    }
+    if matches!(policy.preserve_min, PreserveMin::Latest) && n > 0 {
+        preserve[n - 1] = true;
+    }
+
+    // Cascade: each tier preserves its representatives (within its count) and
+    // rolls the oldest representative up into the next coarser tier. The roll-up
+    // happens unconditionally (independent of whether this tier preserves).
+    let mut first_days: BTreeMap<i64, usize> = BTreeMap::new();
+    for &i in first_hours.values().rev() {
+        if covers(policy.hourly, deltas[i].hours) {
+            preserve[i] = true;
+        }
+        first_days.entry(deltas[i].days).or_insert(i);
+    }
+    let mut first_weeks: BTreeMap<i64, usize> = BTreeMap::new();
+    for &i in first_days.values().rev() {
+        if covers(policy.daily, deltas[i].days) {
+            preserve[i] = true;
+        }
+        first_weeks.entry(deltas[i].weeks).or_insert(i);
+    }
+    let mut first_weekly_months: BTreeMap<i64, usize> = BTreeMap::new();
+    for &i in first_weeks.values().rev() {
+        if covers(policy.weekly, deltas[i].weeks) {
+            preserve[i] = true;
+        }
+        first_weekly_months.entry(deltas[i].months).or_insert(i);
+    }
+    let mut first_monthly_years: BTreeMap<i64, usize> = BTreeMap::new();
+    for &i in first_weekly_months.values().rev() {
+        if covers(policy.monthly, deltas[i].months) {
+            preserve[i] = true;
+        }
+        first_monthly_years.entry(deltas[i].years).or_insert(i);
+    }
+    for &i in first_monthly_years.values().rev() {
+        if covers(policy.yearly, deltas[i].years) {
+            preserve[i] = true;
+        }
+    }
+
+    let mut keep = Vec::new();
+    let mut drop = Vec::new();
+    for (i, e) in entries.into_iter().enumerate() {
+        if preserve[i] {
+            keep.push(e.payload);
+        } else {
+            drop.push(e.payload);
+        }
+    }
+    Schedule {
+        preserve: keep,
+        delete: drop,
+    }
+}
+
+fn start_of_hour(dt: NaiveDateTime) -> NaiveDateTime {
+    dt - TimeDelta::minutes(i64::from(dt.minute())) - TimeDelta::seconds(i64::from(dt.second()))
+}
+
+fn compute_deltas<T>(
+    e: &DatedEntry<T>,
+    now: NaiveDateTime,
+    now_soh: NaiveDateTime,
+    policy: &RetentionPolicy,
+) -> Deltas {
+    let tm = e.local;
+
+    let mut dh_from_hod = i64::from(tm.hour())
+        - if e.has_exact_time {
+            i64::from(policy.hour_of_day)
+        } else {
+            0
+        };
+    let mut dd_from_eow = i64::from(tm.weekday().num_days_from_sunday())
+        - i64::from(policy.day_of_week.num_days_from_sunday());
+    if dh_from_hod < 0 {
+        dh_from_hod += 24;
+        dd_from_eow -= 1;
+    }
+    if dd_from_eow < 0 {
+        dd_from_eow += 7;
+    }
+
+    // Months/years are anchored on the first `day_of_week` of the period.
+    let mut month0 = i64::from(tm.month0());
+    let mut year = i64::from(tm.year());
+    if i64::from(tm.day()) <= dd_from_eow {
+        month0 -= 1;
+        if month0 < 0 {
+            month0 = 11;
+            year -= 1;
+        }
+    }
+
+    let hours = (now_soh - start_of_hour(tm)).num_hours();
+    let days = (hours + dh_from_hod) / 24;
+    let weeks = (days + dd_from_eow) / 7;
+    let years = i64::from(now.year()) - year;
+    let months = years * 12 + (i64::from(now.month0()) - month0);
+
+    Deltas {
+        hours,
+        days,
+        weeks,
+        months,
+        years,
+    }
+}
+
+/// Whether a tier preserves an entry whose delta (in that tier's unit) is `delta`.
+fn covers(tier: Option<TierCount>, delta: i64) -> bool {
+    match tier {
+        Some(TierCount::All) => true,
+        Some(TierCount::Count(n)) => n > 0 && delta <= i64::from(n),
+        None => false,
+    }
+}
+
+/// Whether the `preserve_min` floor covers an entry with these deltas.
+fn min_covers(policy: &RetentionPolicy, d: &Deltas) -> bool {
+    match policy.preserve_min {
+        PreserveMin::All => true,
+        PreserveMin::None | PreserveMin::Latest => false,
+        PreserveMin::Within(n, unit) => {
+            let delta = match unit {
+                Unit::Hours => d.hours,
+                Unit::Days => d.days,
+                Unit::Weeks => d.weeks,
+                Unit::Months => d.months,
+                Unit::Years => d.years,
+            };
+            delta <= i64::from(n)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveDateTime};
+
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, 0)
+            .unwrap()
+    }
+
+    fn at(
+        label: &'static str,
+        y: i32,
+        mo: u32,
+        d: u32,
+        h: u32,
+        mi: u32,
+    ) -> DatedEntry<&'static str> {
+        let local = dt(y, mo, d, h, mi);
+        DatedEntry {
+            instant: local.and_utc().timestamp(),
+            local,
+            has_exact_time: true,
+            nn: 0,
+            payload: label,
+        }
+    }
+
+    fn sorted(mut v: Vec<&'static str>) -> Vec<&'static str> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn preserve_min_all_keeps_everything() {
+        let entries = vec![at("a", 2024, 1, 1, 12, 0), at("b", 2024, 1, 2, 12, 0)];
+        let p = RetentionPolicy::default(); // preserve_min = All
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["a", "b"]);
+        assert!(s.delete.is_empty());
+    }
+
+    #[test]
+    fn preserve_min_none_deletes_everything() {
+        let entries = vec![at("a", 2024, 1, 1, 12, 0), at("b", 2024, 1, 2, 12, 0)];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert!(s.preserve.is_empty());
+        assert_eq!(sorted(s.delete), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn preserve_min_latest_keeps_only_newest() {
+        let entries = vec![
+            at("old", 2024, 1, 1, 12, 0),
+            at("mid", 2024, 1, 2, 12, 0),
+            at("new", 2024, 1, 3, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::Latest,
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(s.preserve, vec!["new"]);
+        assert_eq!(sorted(s.delete), vec!["mid", "old"]);
+    }
+
+    #[test]
+    fn preserve_min_within_days_keeps_recent() {
+        let entries = vec![
+            at("d10", 2024, 1, 10, 12, 0),
+            at("d09", 2024, 1, 9, 12, 0),
+            at("d08", 2024, 1, 8, 12, 0),
+            at("d07", 2024, 1, 7, 12, 0),
+            at("d06", 2024, 1, 6, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::Within(2, Unit::Days),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["d08", "d09", "d10"]);
+        assert_eq!(sorted(s.delete), vec!["d06", "d07"]);
+    }
+
+    #[test]
+    fn daily_tier_keeps_first_of_day_for_n_days() {
+        let entries = vec![
+            at("d10", 2024, 1, 10, 12, 0),
+            at("d09", 2024, 1, 9, 12, 0),
+            at("d08", 2024, 1, 8, 12, 0),
+            at("d07", 2024, 1, 7, 12, 0),
+            at("d06", 2024, 1, 6, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            daily: Some(TierCount::Count(3)),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["d07", "d08", "d09", "d10"]);
+        assert_eq!(sorted(s.delete), vec!["d06"]);
+    }
+
+    #[test]
+    fn oldest_in_day_bucket_is_the_representative() {
+        let entries = vec![
+            at("morning", 2024, 1, 8, 8, 0),
+            at("evening", 2024, 1, 8, 20, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            daily: Some(TierCount::Count(7)),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(s.preserve, vec!["morning"]);
+        assert_eq!(s.delete, vec!["evening"]);
+    }
+
+    #[test]
+    fn weekly_tier_keeps_first_of_week() {
+        // Reference week starts on Sunday (default). One entry per week.
+        let entries = vec![
+            at("w0", 2024, 1, 10, 12, 0),
+            at("w1", 2024, 1, 3, 12, 0),
+            at("w2", 2023, 12, 27, 12, 0),
+            at("w3", 2023, 12, 20, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            weekly: Some(TierCount::Count(2)),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["w0", "w1", "w2"]);
+        assert_eq!(s.delete, vec!["w3"]);
+    }
+
+    #[test]
+    fn monthly_tier_keeps_first_weekly_of_month() {
+        // 20th of each month is past the first Sunday, so no month shift.
+        let entries = vec![
+            at("feb", 2024, 2, 20, 12, 0),
+            at("jan", 2024, 1, 20, 12, 0),
+            at("dec", 2023, 12, 20, 12, 0),
+            at("nov", 2023, 11, 20, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            monthly: Some(TierCount::Count(2)),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 3, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["feb", "jan"]);
+        assert_eq!(sorted(s.delete), vec!["dec", "nov"]);
+    }
+
+    #[test]
+    fn all_tier_keeps_every_representative() {
+        let entries = vec![
+            at("d10", 2024, 1, 10, 12, 0),
+            at("d09", 2024, 1, 9, 12, 0),
+            at("d08", 2024, 1, 8, 12, 0),
+        ];
+        let p = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            daily: Some(TierCount::All),
+            ..Default::default()
+        };
+        let s = schedule(entries, &p, dt(2024, 1, 10, 12, 0));
+        assert_eq!(sorted(s.preserve), vec!["d08", "d09", "d10"]);
+        assert!(s.delete.is_empty());
+    }
+
+    #[test]
+    fn empty_input_yields_empty_schedule() {
+        let p = RetentionPolicy::default();
+        let s: Schedule<&str> = schedule(vec![], &p, dt(2024, 1, 10, 12, 0));
+        assert!(s.preserve.is_empty());
+        assert!(s.delete.is_empty());
+    }
+}
