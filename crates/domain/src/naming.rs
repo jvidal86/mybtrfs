@@ -39,14 +39,20 @@ pub enum TimestampFormat {
 /// injected timezone (see the retention scheduler).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedName {
+    /// Original subvolume base name (the part before the timestamp suffix).
     pub basename: String,
+    /// Parsed local date-time without timezone offset (always present; time-of-day is `00:00` for `short` format).
     pub naive: NaiveDateTime,
+    /// `true` when the timestamp includes HH:MM (long or long-iso format).
     pub has_exact_time: bool,
+    /// Timezone offset; `Some` only for `long-iso` timestamps, `None` for `short`/`long`.
     pub offset: Option<FixedOffset>,
+    /// Collision counter from the `_N` suffix; `0` means no suffix was present.
     pub nn: u32,
 }
 
 /// Format the timestamp postfix for `dt` in the requested format.
+#[must_use]
 pub fn format_timestamp(dt: DateTime<FixedOffset>, fmt: TimestampFormat) -> String {
     match fmt {
         TimestampFormat::Short => dt.format(SHORT_FORMAT).to_string(),
@@ -57,11 +63,13 @@ pub fn format_timestamp(dt: DateTime<FixedOffset>, fmt: TimestampFormat) -> Stri
 
 /// Build `<basename>.<timestamp>` (a collision counter is added via
 /// [`with_counter`]).
+#[must_use]
 pub fn make_name(basename: &str, dt: DateTime<FixedOffset>, fmt: TimestampFormat) -> String {
     format!("{basename}.{}", format_timestamp(dt, fmt))
 }
 
 /// Append a collision counter to a generated name: `<name>_<counter>`.
+#[must_use]
 pub fn with_counter(name: &str, counter: u32) -> String {
     format!("{name}_{counter}")
 }
@@ -86,6 +94,7 @@ fn name_regex() -> &'static Regex {
 
 /// Parse a btrbk-style subvolume name, or `None` if it does not match the scheme
 /// (such names are left untouched by mybtrfs).
+#[must_use]
 pub fn parse_name(name: &str) -> Option<ParsedName> {
     let caps = name_regex().captures(name)?;
     let group = |k: &str| caps.name(k).map(|m| m.as_str());

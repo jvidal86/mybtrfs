@@ -3,9 +3,9 @@
 //! `FixedClock`, `ScriptedPrompter`) go behind `#[cfg(test)]` / a test-support
 //! module. See `documentation/02-architecture-v2.md` §3.
 
-pub mod btrfs_cli;
-pub mod clock;
-pub mod drive_discovery;
-pub mod journal;
-pub mod local_fs;
-pub mod prompter;
+pub(crate) mod btrfs_cli;
+pub(crate) mod clock;
+pub(crate) mod drive_discovery;
+pub(crate) mod journal;
+pub(crate) mod local_fs;
+pub(crate) mod prompter;

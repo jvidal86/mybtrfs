@@ -5,9 +5,13 @@
 
 mod cli;
 
+mod exit_code {
+    pub const ERROR: i32 = 1;
+}
+
 fn main() {
     // SCAFFOLD ONLY — no behavior yet. Implementation is driven by the spec in
     // `documentation/05-e2e-test-spec.md` (SDD/TDD): red → green → refactor.
     eprintln!("mybtrfs: not yet implemented (scaffold) — see ./documentation/");
-    std::process::exit(1);
+    std::process::exit(exit_code::ERROR);
 }

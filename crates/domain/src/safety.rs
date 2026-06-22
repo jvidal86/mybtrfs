@@ -37,6 +37,7 @@ pub struct SafetyContext {
 
 /// Apply the safety anchors to a schedule. Monotonic: subvolumes only ever move
 /// from `delete` to `preserve`, never the reverse.
+#[must_use]
 pub fn enforce(schedule: Schedule<Subvolume>, ctx: &SafetyContext) -> Schedule<Subvolume> {
     let Schedule {
         mut preserve,
@@ -64,6 +65,7 @@ pub fn enforce(schedule: Schedule<Subvolume>, ctx: &SafetyContext) -> Schedule<S
 /// The newest source snapshot that still has a correlated backup on the target,
 /// together with those backups. Both halves should be force-preserved so the next
 /// incremental backup keeps a common parent on both ends.
+#[must_use]
 pub fn latest_common_pair<'a>(
     snapshots: &'a [Subvolume],
     target: &'a RelationshipGraph,

@@ -7,6 +7,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "GPL-3.0-or-later"
 authors = ["jvidal86"]
 repository = "https://github.com/jvidal86/mybtrfs"
@@ -31,3 +32,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+# curated pedantic subset
+missing_panics_doc = "warn"
+must_use_candidate = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+explicit_iter_loop = "warn"

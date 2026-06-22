@@ -55,11 +55,17 @@ pub enum TierCount {
 /// A retention policy for one set (snapshots *or* backups).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPolicy {
+    /// Minimum-keep floor applied before tier logic (preserves a window unconditionally).
     pub preserve_min: PreserveMin,
+    /// How many hourly representatives to keep; `None` means this tier is disabled.
     pub hourly: Option<TierCount>,
+    /// How many daily representatives to keep; `None` means this tier is disabled.
     pub daily: Option<TierCount>,
+    /// How many weekly representatives to keep; `None` means this tier is disabled.
     pub weekly: Option<TierCount>,
+    /// How many monthly representatives to keep; `None` means this tier is disabled.
     pub monthly: Option<TierCount>,
+    /// How many yearly representatives to keep; `None` means this tier is disabled.
     pub yearly: Option<TierCount>,
     /// Hour (0–23) at which a "day" begins.
     pub hour_of_day: u32,
@@ -86,17 +92,24 @@ impl Default for RetentionPolicy {
 /// `local` is the wall-clock time in the reference timezone (for calendar math).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatedEntry<T> {
+    /// Unix timestamp (seconds) used for absolute ordering.
     pub instant: i64,
+    /// Wall-clock time in the reference timezone, used for calendar-period math.
     pub local: NaiveDateTime,
+    /// `true` when the source name carried an explicit HH:MM time component.
     pub has_exact_time: bool,
+    /// Collision counter from the `_N` name suffix; `0` means no suffix.
     pub nn: u32,
+    /// The caller-supplied data associated with this entry.
     pub payload: T,
 }
 
 /// The scheduler's verdict: payloads partitioned into preserve/delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule<T> {
+    /// Entries that must be kept (sorted oldest-first by `instant`).
     pub preserve: Vec<T>,
+    /// Entries that are safe to delete (sorted oldest-first by `instant`).
     pub delete: Vec<T>,
 }
 
@@ -110,6 +123,7 @@ struct Deltas {
 }
 
 /// Classify each entry as preserve or delete per `policy`, relative to `now`.
+#[must_use]
 pub fn schedule<T>(
     mut entries: Vec<DatedEntry<T>>,
     policy: &RetentionPolicy,

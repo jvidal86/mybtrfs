@@ -36,12 +36,15 @@ pub enum Incremental {
 /// correlated copy on the target.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParentSelection {
+    /// Incremental parent passed to `btrfs send -p`; `None` means a full send.
     pub parent: Option<Subvolume>,
+    /// Additional clone sources passed to `btrfs send -c`; may be empty.
     pub clone_sources: Vec<Subvolume>,
 }
 
 /// Whether two read-only subvolumes are correlated (hold the same content).
 /// Mirrors btrbk `_is_correlated`.
+#[must_use]
 pub fn is_correlated(a: &Subvolume, b: &Subvolume) -> bool {
     a.readonly
         && b.readonly
@@ -58,6 +61,7 @@ fn same(x: &Option<Uuid>, y: &Option<Uuid>) -> bool {
 /// The read-only subvolumes in `graph` connected to `snapshot` through the
 /// `parent_uuid` lineage (climb to the chain top, then walk down), excluding
 /// `snapshot` itself.
+#[must_use]
 pub fn related<'a>(graph: &'a RelationshipGraph, snapshot: &Subvolume) -> Vec<&'a Subvolume> {
     const MAX_DEPTH: usize = 4096;
 
@@ -102,6 +106,7 @@ pub fn related<'a>(graph: &'a RelationshipGraph, snapshot: &Subvolume) -> Vec<&'
 }
 
 /// Resolve the incremental parent and clone sources for `snapshot`.
+#[must_use]
 pub fn best_parent(
     snapshot: &Subvolume,
     source: &RelationshipGraph,
@@ -140,6 +145,8 @@ pub fn best_parent(
             .cmp(&a.reference_generation())
             .then(b.id.cmp(&a.id))
     });
+    // SAFETY: `candidates` is non-empty — the early-return above guarantees this,
+    // so `candidates.len() - 1` cannot underflow.
     let parent_pos = candidates
         .iter()
         .position(|s| s.reference_generation() <= snap_gen)
@@ -153,6 +160,7 @@ pub fn best_parent(
 }
 
 /// The correlated copies of `subvol` present on `target` (deduplicated by id).
+#[must_use]
 pub fn target_correlates<'a>(
     subvol: &Subvolume,
     target: &'a RelationshipGraph,

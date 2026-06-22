@@ -26,6 +26,7 @@ const UUID_GROUP_LENGTHS: [usize; 5] = [8, 4, 4, 4, 12];
 
 impl Uuid {
     /// Parse a canonical UUID, normalizing to lowercase. `None` if malformed.
+    #[must_use]
     pub fn parse(value: &str) -> Option<Uuid> {
         let value = value.trim();
         if is_canonical_uuid(value) {
@@ -37,6 +38,7 @@ impl Uuid {
 
     /// Interpret a UUID field from btrfs output: the `"-"` sentinel (and empty)
     /// map to `None`; anything else is parsed (malformed also yields `None`).
+    #[must_use]
     pub fn from_btrfs(value: &str) -> Option<Uuid> {
         let trimmed = value.trim();
         if trimmed.is_empty() || trimmed == "-" {
@@ -46,6 +48,8 @@ impl Uuid {
         }
     }
 
+    /// Returns the inner UUID string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -77,7 +81,9 @@ pub struct Subvolume {
     pub generation: u64,
     /// Generation at creation ("cgen").
     pub cgen: u64,
+    /// Whether this subvolume is read-only.
     pub readonly: bool,
+    /// Path relative to the owning filesystem mountpoint.
     pub path: PathBuf,
     /// UUID of the filesystem this subvolume lives on (relationship indexes and
     /// reachability checks are per filesystem).
@@ -89,12 +95,14 @@ pub struct Subvolume {
 impl Subvolume {
     /// An incompletely received ("garbled") subvolume: writable with no
     /// received_uuid. btrfs leaves these behind on an interrupted receive.
+    #[must_use]
     pub fn is_garbled(&self) -> bool {
         !self.readonly && self.received_uuid.is_none()
     }
 
     /// The generation used to order/reference this subvolume: `cgen` for
     /// read-only subvolumes, `generation` for read-write ones.
+    #[must_use]
     pub fn reference_generation(&self) -> u64 {
         if self.readonly {
             self.cgen
@@ -127,6 +135,9 @@ pub struct RelationshipGraph {
 
 impl RelationshipGraph {
     /// Build the indexes, rejecting a duplicate `uuid`.
+    ///
+    /// # Errors
+    /// Returns [`GraphError::DuplicateUuid`] if any two subvolumes share the same UUID.
     pub fn build(subvols: Vec<Subvolume>) -> Result<Self, GraphError> {
         let mut by_uuid: HashMap<Uuid, usize> = HashMap::new();
         let mut by_parent_uuid: HashMap<Uuid, Vec<usize>> = HashMap::new();
@@ -158,21 +169,25 @@ impl RelationshipGraph {
     }
 
     /// The subvolume with this `uuid`, if present.
+    #[must_use]
     pub fn get(&self, uuid: &Uuid) -> Option<&Subvolume> {
         self.by_uuid.get(uuid).map(|&i| &self.subvols[i])
     }
 
     /// Subvolumes whose `parent_uuid` equals `parent` ("is-snapshot-of").
+    #[must_use]
     pub fn children_of(&self, parent: &Uuid) -> Vec<&Subvolume> {
         self.indexed(self.by_parent_uuid.get(parent))
     }
 
     /// Subvolumes whose `received_uuid` equals `source` (received from it).
+    #[must_use]
     pub fn received_from(&self, source: &Uuid) -> Vec<&Subvolume> {
         self.indexed(self.by_received_uuid.get(source))
     }
 
     /// All subvolumes (including any without a uuid).
+    #[must_use]
     pub fn all(&self) -> &[Subvolume] {
         &self.subvols
     }
