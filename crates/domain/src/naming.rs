@@ -74,6 +74,34 @@ pub fn with_counter(name: &str, counter: u32) -> String {
     format!("{name}_{counter}")
 }
 
+/// Given a generated `base` name (already including the timestamp) and the leaf
+/// names that already exist in the target directory, return the first
+/// non-colliding name: `base` itself if free, otherwise `base_N` where `N` is one
+/// past the highest counter already present (a bare `base` counts as `0`).
+/// Mirrors btrbk's same-timestamp `_N` collision scan.
+#[must_use]
+pub fn next_free_name(base: &str, existing: &[&str]) -> String {
+    let highest = existing
+        .iter()
+        .filter_map(|leaf| counter_of(base, leaf))
+        .max();
+    match highest {
+        Some(n) => with_counter(base, n + 1),
+        None => base.to_string(),
+    }
+}
+
+/// The counter a `leaf` represents for `base`: `Some(0)` for an exact match,
+/// `Some(n)` for `base_n`, `None` if `leaf` is unrelated to `base`.
+fn counter_of(base: &str, leaf: &str) -> Option<u32> {
+    if leaf == base {
+        return Some(0);
+    }
+    leaf.strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .and_then(|n| n.parse::<u32>().ok())
+}
+
 #[allow(clippy::expect_used)] // compile-time-constant pattern; cannot fail at runtime
 fn name_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -273,5 +301,57 @@ mod tests {
         let p = parse_name(&name).unwrap();
         assert_eq!(p.offset, Some(FixedOffset::east_opt(2 * 3600).unwrap()));
         assert_eq!(p.naive.second(), 9);
+    }
+
+    // --- collision-free naming ---
+
+    #[test]
+    fn next_free_name_returns_base_when_no_collision() {
+        assert_eq!(
+            next_free_name("home.20240102T1531", &[]),
+            "home.20240102T1531"
+        );
+        assert_eq!(
+            next_free_name(
+                "home.20240102T1531",
+                &["other.20240102T1531", "home.20240101T0000"]
+            ),
+            "home.20240102T1531"
+        );
+    }
+
+    #[test]
+    fn next_free_name_bumps_past_highest_existing_counter() {
+        assert_eq!(
+            next_free_name("home.20240102T1531", &["home.20240102T1531"]),
+            "home.20240102T1531_1"
+        );
+        assert_eq!(
+            next_free_name(
+                "home.20240102T1531",
+                &[
+                    "home.20240102T1531",
+                    "home.20240102T1531_1",
+                    "home.20240102T1531_2",
+                ]
+            ),
+            "home.20240102T1531_3"
+        );
+        // Bare base absent, only `_2` present → still one past the max.
+        assert_eq!(
+            next_free_name("home.20240102T1531", &["home.20240102T1531_2"]),
+            "home.20240102T1531_3"
+        );
+    }
+
+    #[test]
+    fn next_free_name_ignores_unrelated_and_malformed_counters() {
+        assert_eq!(
+            next_free_name(
+                "home.20240102T1531",
+                &["home.20240102T1531_x", "home.20240102T1531extra"]
+            ),
+            "home.20240102T1531"
+        );
     }
 }

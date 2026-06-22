@@ -3,5 +3,226 @@
 //! incremental parent via the domain, transfers via `TransferPort` (which
 //! verifies), and delegates deletion to `RetentionService`.
 //! See `documentation/01-phases-design-v2.md` Phases 1–2.
-//
-// TODO (Phase 1 full backup; Phase 2 incremental).
+
+use std::ffi::OsStr;
+use std::path::Path;
+
+use mybtrfs_domain::model::Subvolume;
+use mybtrfs_domain::naming::{TimestampFormat, make_name, next_free_name};
+
+use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository};
+
+/// Orchestrates the backup operations over the driven ports. Phase 1 covers
+/// `snapshot`; `run`/`resume` (send/receive + prune) follow in later increments.
+pub struct BackupService<'a> {
+    clock: &'a dyn ClockPort,
+    repo: &'a dyn SubvolumeRepository,
+    snapshots: &'a dyn SnapshotPort,
+    format: TimestampFormat,
+}
+
+impl<'a> BackupService<'a> {
+    /// Construct a service over the injected clock, subvolume repository,
+    /// snapshot port, and the timestamp format used for snapshot names.
+    #[must_use]
+    pub fn new(
+        clock: &'a dyn ClockPort,
+        repo: &'a dyn SubvolumeRepository,
+        snapshots: &'a dyn SnapshotPort,
+        format: TimestampFormat,
+    ) -> Self {
+        Self {
+            clock,
+            repo,
+            snapshots,
+            format,
+        }
+    }
+
+    /// Create a read-only snapshot of `source` inside `snapshot_dir`, named
+    /// `<basename>.<timestamp>` from the injected clock. If that name already
+    /// exists in `snapshot_dir`, a `_N` collision counter is appended so an
+    /// existing snapshot is never clobbered (re-runs stay non-destructive).
+    /// Returns the created subvolume as reported by the snapshot port.
+    ///
+    /// # Errors
+    /// Propagates any [`PortError`] from the repository or snapshot port.
+    pub fn snapshot(
+        &self,
+        source: &Path,
+        snapshot_dir: &Path,
+        basename: &str,
+    ) -> Result<Subvolume, PortError> {
+        let base = make_name(basename, self.clock.now(), self.format);
+
+        let existing = self.repo.list(snapshot_dir)?;
+        let leaves: Vec<&str> = existing
+            .iter()
+            .filter(|sv| {
+                let abs = sv.mountpoint.join(&sv.path);
+                abs.parent() == Some(snapshot_dir)
+            })
+            .filter_map(|sv| sv.path.file_name().and_then(OsStr::to_str))
+            .collect();
+
+        let dest = snapshot_dir.join(next_free_name(&base, &leaves));
+        self.snapshots.create_readonly(source, &dest)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use chrono::{DateTime, FixedOffset};
+
+    use mybtrfs_domain::model::{Subvolume, Uuid};
+    use mybtrfs_domain::naming::TimestampFormat;
+
+    use crate::backup::BackupService;
+    use crate::ports::{ClockPort, PortError, SnapshotPort, SubvolumeRepository};
+
+    /// A clock fixed at a single instant.
+    struct FixedClock(DateTime<FixedOffset>);
+    impl FixedClock {
+        fn at(rfc3339: &str) -> Self {
+            Self(DateTime::parse_from_rfc3339(rfc3339).expect("valid rfc3339"))
+        }
+    }
+    impl ClockPort for FixedClock {
+        fn now(&self) -> DateTime<FixedOffset> {
+            self.0
+        }
+    }
+
+    /// A `SnapshotPort` that records its calls and returns a synthetic read-only
+    /// subvolume at the requested destination.
+    #[derive(Default)]
+    struct RecordingSnapshot {
+        readonly_calls: RefCell<Vec<(PathBuf, PathBuf)>>,
+    }
+    impl RecordingSnapshot {
+        fn readonly_calls(&self) -> Vec<(PathBuf, PathBuf)> {
+            self.readonly_calls.borrow().clone()
+        }
+    }
+    impl SnapshotPort for RecordingSnapshot {
+        fn create_readonly(&self, source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
+            self.readonly_calls
+                .borrow_mut()
+                .push((source.to_path_buf(), dest.to_path_buf()));
+            Ok(fake_subvol(dest, true))
+        }
+        fn make_writable(&self, _source: &Path, _dest: &Path) -> Result<Subvolume, PortError> {
+            unimplemented!("restore path not exercised by this test")
+        }
+    }
+
+    /// A `SubvolumeRepository` returning a fixed set of pre-existing subvolumes.
+    #[derive(Default)]
+    struct FakeRepo {
+        subvols: Vec<Subvolume>,
+    }
+    impl SubvolumeRepository for FakeRepo {
+        fn show(&self, _path: &Path) -> Result<Subvolume, PortError> {
+            unimplemented!("show not exercised by these tests")
+        }
+        fn list(&self, _filesystem: &Path) -> Result<Vec<Subvolume>, PortError> {
+            Ok(self.subvols.clone())
+        }
+    }
+
+    /// A synthetic subvolume standing in for what btrfs would report post-create.
+    fn fake_subvol(path: &Path, readonly: bool) -> Subvolume {
+        let uuid = Uuid::parse("11111111-1111-1111-1111-111111111111").expect("valid uuid");
+        Subvolume {
+            id: 256,
+            uuid: Some(uuid.clone()),
+            parent_uuid: None,
+            received_uuid: None,
+            generation: 10,
+            cgen: 10,
+            readonly,
+            path: path.to_path_buf(),
+            fs_uuid: uuid,
+            mountpoint: PathBuf::from("/mnt/pool"),
+        }
+    }
+
+    /// A pre-existing read-only snapshot at `rel` (relative to the pool mountpoint).
+    fn existing_snapshot(rel: &str) -> Subvolume {
+        let uuid = Uuid::parse("22222222-2222-2222-2222-222222222222").expect("valid uuid");
+        Subvolume {
+            id: 300,
+            uuid: Some(uuid.clone()),
+            parent_uuid: None,
+            received_uuid: None,
+            generation: 5,
+            cgen: 5,
+            readonly: true,
+            path: PathBuf::from(rel),
+            fs_uuid: uuid,
+            mountpoint: PathBuf::from("/mnt/pool"),
+        }
+    }
+
+    #[test]
+    fn snapshot_creates_readonly_snapshot_named_with_timestamp() {
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        let repo = FakeRepo::default();
+        let snapshots = RecordingSnapshot::default();
+        let service = BackupService::new(&clock, &repo, &snapshots, TimestampFormat::Long);
+
+        let created = service
+            .snapshot(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+            )
+            .expect("snapshot succeeds");
+
+        // It asked the SnapshotPort for a read-only snapshot at the timestamped dest.
+        assert_eq!(
+            snapshots.readonly_calls(),
+            vec![(
+                PathBuf::from("/mnt/pool/home"),
+                PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531"),
+            )]
+        );
+        // And returned the resulting (read-only) subvolume.
+        assert!(created.readonly);
+        assert_eq!(
+            created.path,
+            PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531")
+        );
+    }
+
+    #[test]
+    fn snapshot_appends_collision_counter_when_name_already_exists() {
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        let repo = FakeRepo {
+            subvols: vec![existing_snapshot(".mybtrfs_snapshots/home.20240102T1531")],
+        };
+        let snapshots = RecordingSnapshot::default();
+        let service = BackupService::new(&clock, &repo, &snapshots, TimestampFormat::Long);
+
+        service
+            .snapshot(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+            )
+            .expect("snapshot succeeds");
+
+        // The new snapshot is named `_1`; the existing one is never clobbered.
+        assert_eq!(
+            snapshots.readonly_calls(),
+            vec![(
+                PathBuf::from("/mnt/pool/home"),
+                PathBuf::from("/mnt/pool/.mybtrfs_snapshots/home.20240102T1531_1"),
+            )]
+        );
+    }
+}
