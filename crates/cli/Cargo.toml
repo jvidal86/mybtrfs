@@ -1,0 +1,17 @@
+[package]
+name = "mybtrfs"
+description = "A backup tool for btrfs subvolumes (a Rust reimagining of btrbk)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mybtrfs-domain.workspace = true
+mybtrfs-application.workspace = true
+mybtrfs-adapters.workspace = true
+# clap + anyhow are added when the CLI is implemented.
+
+[lints]
+workspace = true

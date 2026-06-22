@@ -1,0 +1,16 @@
+[package]
+name = "mybtrfs-domain"
+description = "Pure domain core for mybtrfs (entities + domain services, no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

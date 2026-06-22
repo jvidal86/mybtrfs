@@ -94,6 +94,25 @@ Dependencies point inward: adapters depend on ports, the application depends on
 ports + core, the core depends on nothing external. Concrete adapters are
 selected and wired only at the **composition root** (the CLI `main`).
 
+### Physical layout (Cargo workspace — the dependency rule is compiler-enforced)
+
+The layers are separate crates, so an inner layer *cannot compile* against an
+outer one:
+
+```
+crates/
+  domain/        # mybtrfs-domain      — pure core (model, naming, parent, retention, safety)
+  application/   # mybtrfs-application  — use cases + ports;  deps: domain
+  adapters/      # mybtrfs-adapters     — port impls;         deps: application, domain
+  cli/           # mybtrfs (binary)     — composition root + CLI; deps: all three
+```
+
+Ports live in the `application` crate (the core owns the interfaces it needs);
+adapters depend on `application` to implement them. `mybtrfs-domain` has **no**
+internal dependencies (verify: `cargo tree -p mybtrfs-domain`), and
+`application` does not depend on `adapters`. Shared version/deps/lints are
+centralized in the root `[workspace.*]` tables.
+
 ---
 
 ## 3. Layers in detail
