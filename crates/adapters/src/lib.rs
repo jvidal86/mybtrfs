@@ -20,3 +20,6 @@ pub use btrfs_cli::BtrfsCliAdapter;
 /// Clock adapters: [`SystemClock`] (real wall clock) and [`FixedClock`]
 /// (deterministic, for tests / reproducible runs).
 pub use clock::{FixedClock, SystemClock};
+
+/// Drive discovery: [`LsblkDriveDiscovery`] enumerates mounted btrfs filesystems.
+pub use drive_discovery::LsblkDriveDiscovery;

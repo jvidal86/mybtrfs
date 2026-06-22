@@ -12,8 +12,9 @@ mybtrfs-domain.workspace = true
 mybtrfs-application.workspace = true
 regex.workspace = true
 chrono.workspace = true
-# Other external deps (serde/serde_json/anyhow/thiserror) are added as each
-# adapter is implemented.
+serde.workspace = true
+serde_json.workspace = true
+# Other external deps (anyhow/thiserror) are added as each adapter is implemented.
 
 [lints]
 workspace = true

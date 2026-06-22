@@ -10,9 +10,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use mybtrfs_adapters::{BtrfsCliAdapter, SystemClock};
+use mybtrfs_adapters::{BtrfsCliAdapter, LsblkDriveDiscovery, SystemClock};
 use mybtrfs_application::backup::{BackupService, RunReport};
-use mybtrfs_application::ports::{DeleteCommit, DeletePort, PortError};
+use mybtrfs_application::ports::{
+    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
+};
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::retention::RetentionPolicy;
@@ -141,12 +143,16 @@ fn dispatch(command: &Command) -> Result<()> {
             print_run_report(&report);
             Ok(())
         }
-        Command::Resume
-        | Command::Prune
-        | Command::Restore
-        | Command::List
-        | Command::Stats
-        | Command::ListDrives => bail!("this command is not implemented yet"),
+        Command::ListDrives => {
+            let drives = LsblkDriveDiscovery::new()
+                .detect()
+                .context("drive discovery failed")?;
+            print_drives(&drives);
+            Ok(())
+        }
+        Command::Resume | Command::Prune | Command::Restore | Command::List | Command::Stats => {
+            bail!("this command is not implemented yet")
+        }
     }
 }
 
@@ -177,6 +183,28 @@ fn print_run_report(report: &RunReport) {
         report.snapshots_pruned.delete.len(),
         report.backups_pruned.delete.len()
     );
+}
+
+/// Print the discovered btrfs filesystems (backup-target candidates).
+fn print_drives(drives: &[DiscoveredFilesystem]) {
+    if drives.is_empty() {
+        println!("no mounted btrfs filesystems found");
+        return;
+    }
+    for drive in drives {
+        let label = drive.label.as_deref().unwrap_or("-");
+        let kind = if drive.removable {
+            "removable"
+        } else {
+            "fixed"
+        };
+        println!(
+            "{}\t{}\tlabel={label}\t{kind}\t{}",
+            drive.mountpoint.display(),
+            drive.device.display(),
+            drive.fs_uuid
+        );
+    }
 }
 
 /// Wraps a [`DeletePort`] to log each deletion (observability lives at the
