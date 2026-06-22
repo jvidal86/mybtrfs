@@ -10,11 +10,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use mybtrfs_adapters::{BtrfsCliAdapter, LsblkDriveDiscovery, SystemClock};
+use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
 use mybtrfs_application::backup::{BackupService, RunReport};
 use mybtrfs_application::ports::{
     DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
 };
+use mybtrfs_application::restore::RestoreService;
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::retention::RetentionPolicy;
@@ -61,8 +62,16 @@ enum Command {
     Resume,
     /// Prune snapshots/backups per retention policy (Phase 3).
     Prune,
-    /// Restore a backup to a writable subvolume (Phase 4).
-    Restore,
+    /// Restore a backup to a writable subvolume at `dest` (Phase 4).
+    Restore {
+        /// The backup: a read-only subvolume on the destination filesystem.
+        backup: PathBuf,
+        /// Where to create the writable restored subvolume.
+        dest: PathBuf,
+        /// If `dest` exists, move it aside to `<dest>.broken` instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
     /// List subvolumes (Phase 3).
     List,
     /// Show backup statistics (Phase 3).
@@ -88,6 +97,7 @@ pub fn run() -> ExitCode {
 fn dispatch(command: &Command) -> Result<()> {
     let clock = SystemClock;
     let btrfs = BtrfsCliAdapter::new();
+    let localfs = LocalFsAdapter::new();
     // Deletions are logged at the composition root (decision ID-1).
     let deleter = LoggingDeletePort { inner: &btrfs };
     let retention = RetentionService::new(&clock, &deleter);
@@ -150,7 +160,30 @@ fn dispatch(command: &Command) -> Result<()> {
             print_drives(&drives);
             Ok(())
         }
-        Command::Resume | Command::Prune | Command::Restore | Command::List | Command::Stats => {
+        Command::Restore {
+            backup,
+            dest,
+            force,
+        } => {
+            let backup = validate_path(backup)?;
+            let dest = validate_new_path(dest)?;
+            let report = RestoreService::new(&btrfs, &localfs)
+                .restore(&backup, &dest, *force)
+                .context("restore failed")?;
+            println!(
+                "restored: {}",
+                report
+                    .restored
+                    .mountpoint
+                    .join(&report.restored.path)
+                    .display()
+            );
+            if let Some(moved) = &report.moved_aside {
+                println!("moved aside existing destination to: {}", moved.display());
+            }
+            Ok(())
+        }
+        Command::Resume | Command::Prune | Command::List | Command::Stats => {
             bail!("this command is not implemented yet")
         }
     }
@@ -162,6 +195,22 @@ fn dispatch(command: &Command) -> Result<()> {
 fn validate_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("invalid or missing path: {}", path.display()))
+}
+
+/// Validate a not-yet-existing destination (decision ID-2): its parent must
+/// exist; returns `<canonical-parent>/<final-component>`.
+fn validate_new_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("destination must have a parent directory")?;
+    let name = path
+        .file_name()
+        .context("destination must have a final path component")?;
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("destination parent does not exist: {}", parent.display()))?;
+    Ok(canonical_parent.join(name))
 }
 
 /// Print a one-fact-per-line summary of a completed run.

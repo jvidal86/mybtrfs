@@ -23,3 +23,6 @@ pub use clock::{FixedClock, SystemClock};
 
 /// Drive discovery: [`LsblkDriveDiscovery`] enumerates mounted btrfs filesystems.
 pub use drive_discovery::LsblkDriveDiscovery;
+
+/// Filesystem operations: [`LocalFsAdapter`] (`std::fs`) — existence / mkdir / rename.
+pub use local_fs::LocalFsAdapter;
