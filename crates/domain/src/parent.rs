@@ -125,7 +125,7 @@ pub fn best_parent(
         .iter()
         .filter(|s| s.id != snapshot.id && s.readonly)
         .filter(|s| s.fs_uuid == snapshot.fs_uuid)
-        .filter(|s| has_target_correlate(s, target))
+        .filter(|s| !target_correlates(s, target).is_empty())
         .filter(|s| mode != Incremental::Strict || related_ids.contains(&s.id))
         .collect();
 
@@ -152,19 +152,25 @@ pub fn best_parent(
     }
 }
 
-/// Whether `s` has at least one correlated subvolume on the target.
-fn has_target_correlate(s: &Subvolume, target: &RelationshipGraph) -> bool {
+/// The correlated copies of `subvol` present on `target` (deduplicated by id).
+pub fn target_correlates<'a>(
+    subvol: &Subvolume,
+    target: &'a RelationshipGraph,
+) -> Vec<&'a Subvolume> {
     let mut candidates: Vec<&Subvolume> = Vec::new();
-    if let Some(uuid) = &s.uuid {
+    if let Some(uuid) = &subvol.uuid {
         candidates.extend(target.received_from(uuid));
     }
-    if let Some(received) = &s.received_uuid {
+    if let Some(received) = &subvol.received_uuid {
         if let Some(node) = target.get(received) {
             candidates.push(node);
         }
         candidates.extend(target.received_from(received));
     }
-    candidates.into_iter().any(|t| is_correlated(s, t))
+    candidates.retain(|t| is_correlated(subvol, t));
+    candidates.sort_by_key(|t| t.id);
+    candidates.dedup_by_key(|t| t.id);
+    candidates
 }
 
 #[cfg(test)]
