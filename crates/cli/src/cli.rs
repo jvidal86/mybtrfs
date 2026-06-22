@@ -89,11 +89,14 @@ fn dispatch(command: &Command) -> Result<()> {
     // Deletions are logged at the composition root (decision ID-1).
     let deleter = LoggingDeletePort { inner: &btrfs };
     let retention = RetentionService::new(&clock, &deleter);
+    // One resolve-per-path adapter serves as both source and target repository
+    // (it resolves each path's filesystem), plus the snapshot and transfer ports.
     let backup = BackupService::new(
         &clock,
-        &btrfs,
-        &btrfs,
-        &btrfs,
+        &btrfs, // source_repo
+        &btrfs, // target_repo
+        &btrfs, // snapshots
+        &btrfs, // transfer
         &retention,
         TimestampFormat::Long,
     );

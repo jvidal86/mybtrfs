@@ -38,7 +38,13 @@ pub struct RunReport {
 /// [`RetentionService`]. Incremental parent resolution is a later increment.
 pub struct BackupService<'a> {
     clock: &'a dyn ClockPort,
-    repo: &'a dyn SubvolumeRepository,
+    /// Repository scoped to the **source** filesystem (where snapshots live).
+    source_repo: &'a dyn SubvolumeRepository,
+    /// Repository scoped to the **target** filesystem (where backups live). A
+    /// btrfs repository stamps each subvolume with its filesystem's
+    /// uuid/mountpoint, so source and target need distinct, correctly-scoped
+    /// repositories — one repo can't correctly describe subvolumes on both.
+    target_repo: &'a dyn SubvolumeRepository,
     snapshots: &'a dyn SnapshotPort,
     transfer: &'a dyn TransferPort,
     retention: &'a RetentionService<'a>,
@@ -46,13 +52,14 @@ pub struct BackupService<'a> {
 }
 
 impl<'a> BackupService<'a> {
-    /// Construct a service over the injected clock, subvolume repository,
-    /// snapshot and transfer ports, the retention service, and the timestamp
-    /// format used for snapshot names.
+    /// Construct a service over the injected clock, the source/target subvolume
+    /// repositories, the snapshot and transfer ports, the retention service, and
+    /// the timestamp format used for snapshot names.
     #[must_use]
     pub fn new(
         clock: &'a dyn ClockPort,
-        repo: &'a dyn SubvolumeRepository,
+        source_repo: &'a dyn SubvolumeRepository,
+        target_repo: &'a dyn SubvolumeRepository,
         snapshots: &'a dyn SnapshotPort,
         transfer: &'a dyn TransferPort,
         retention: &'a RetentionService<'a>,
@@ -60,7 +67,8 @@ impl<'a> BackupService<'a> {
     ) -> Self {
         Self {
             clock,
-            repo,
+            source_repo,
+            target_repo,
             snapshots,
             transfer,
             retention,
@@ -84,7 +92,7 @@ impl<'a> BackupService<'a> {
     ) -> Result<Subvolume, PortError> {
         let base = make_name(basename, self.clock.now(), self.format);
 
-        let existing = self.repo.list(snapshot_dir)?;
+        let existing = self.source_repo.list(snapshot_dir)?;
         let leaves: Vec<&str> = existing
             .iter()
             .filter(|sv| is_in_dir(snapshot_dir, sv))
@@ -124,9 +132,10 @@ impl<'a> BackupService<'a> {
                 .send_receive(&snapshot, &ParentSelection::default(), target_dir)?;
 
         // Candidate sets: what's on disk now, plus the just-created entries (a
-        // stateless repository may not observe them until the next run).
-        let snapshots = self.collect_in(snapshot_dir, &snapshot)?;
-        let backups = self.collect_in(target_dir, &backup)?;
+        // stateless repository may not observe them until the next run). Each set
+        // is read from its own filesystem's repository.
+        let snapshots = self.collect_in(self.source_repo, snapshot_dir, &snapshot)?;
+        let backups = self.collect_in(self.target_repo, target_dir, &backup)?;
 
         // Force-preserve anchors: the just-created pair plus the latest common
         // snapshot/backup pair.
@@ -167,15 +176,16 @@ impl<'a> BackupService<'a> {
         })
     }
 
-    /// List the subvolumes directly in `dir`, ensuring `just_created` is included
-    /// (a stateless repository may not observe it until the next run).
+    /// List the subvolumes directly in `dir` (via `repo`, scoped to that
+    /// directory's filesystem), ensuring `just_created` is included (a stateless
+    /// repository may not observe it until the next run).
     fn collect_in(
         &self,
+        repo: &dyn SubvolumeRepository,
         dir: &Path,
         just_created: &Subvolume,
     ) -> Result<Vec<Subvolume>, PortError> {
-        let mut subvols: Vec<Subvolume> = self
-            .repo
+        let mut subvols: Vec<Subvolume> = repo
             .list(dir)?
             .into_iter()
             .filter(|sv| is_in_dir(dir, sv))
@@ -374,14 +384,16 @@ mod tests {
     #[test]
     fn snapshot_creates_readonly_snapshot_named_with_timestamp() {
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
-        let repo = FakeRepo::default();
+        let source_repo = FakeRepo::default();
+        let target_repo = FakeRepo::default();
         let snapshots = RecordingSnapshot::default();
         let transfer = RecordingTransfer::default();
         let deleter = RecordingDeleter::default();
         let retention = RetentionService::new(&clock, &deleter);
         let service = BackupService::new(
             &clock,
-            &repo,
+            &source_repo,
+            &target_repo,
             &snapshots,
             &transfer,
             &retention,
@@ -413,16 +425,18 @@ mod tests {
     #[test]
     fn snapshot_appends_collision_counter_when_name_already_exists() {
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
-        let repo = FakeRepo {
+        let source_repo = FakeRepo {
             subvols: vec![existing_snapshot(".mybtrfs_snapshots/home.20240102T1531")],
         };
+        let target_repo = FakeRepo::default();
         let snapshots = RecordingSnapshot::default();
         let transfer = RecordingTransfer::default();
         let deleter = RecordingDeleter::default();
         let retention = RetentionService::new(&clock, &deleter);
         let service = BackupService::new(
             &clock,
-            &repo,
+            &source_repo,
+            &target_repo,
             &snapshots,
             &transfer,
             &retention,
@@ -449,14 +463,16 @@ mod tests {
     #[test]
     fn run_snapshots_full_send_receives_then_keeps_all_by_default() {
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
-        let repo = FakeRepo::default();
+        let source_repo = FakeRepo::default();
+        let target_repo = FakeRepo::default();
         let snapshots = RecordingSnapshot::default();
         let transfer = RecordingTransfer::default();
         let deleter = RecordingDeleter::default();
         let retention = RetentionService::new(&clock, &deleter);
         let service = BackupService::new(
             &clock,
-            &repo,
+            &source_repo,
+            &target_repo,
             &snapshots,
             &transfer,
             &retention,
@@ -504,24 +520,25 @@ mod tests {
     #[test]
     fn run_prunes_orphans_but_force_preserves_the_just_created_pair() {
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
-        // An old snapshot and an old backup, each uncorrelated (orphans).
-        let repo = FakeRepo {
-            subvols: vec![
-                ro(
-                    10,
-                    uuid_hex(10),
-                    None,
-                    "/mnt/pool",
-                    ".mybtrfs_snapshots/home.20240101T1200",
-                ),
-                ro(
-                    20,
-                    uuid_hex(20),
-                    Some(uuid_hex(0xff)),
-                    "/mnt/drive",
-                    "host/home.20240101T1200",
-                ),
-            ],
+        // An old snapshot (source fs) and an old backup (target fs), each
+        // uncorrelated (orphans) — read from their respective repositories.
+        let source_repo = FakeRepo {
+            subvols: vec![ro(
+                10,
+                uuid_hex(10),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1200",
+            )],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![ro(
+                20,
+                uuid_hex(20),
+                Some(uuid_hex(0xff)),
+                "/mnt/drive",
+                "host/home.20240101T1200",
+            )],
         };
         let snapshots = RecordingSnapshot::default();
         let transfer = RecordingTransfer::default();
@@ -529,7 +546,8 @@ mod tests {
         let retention = RetentionService::new(&clock, &deleter);
         let service = BackupService::new(
             &clock,
-            &repo,
+            &source_repo,
+            &target_repo,
             &snapshots,
             &transfer,
             &retention,
