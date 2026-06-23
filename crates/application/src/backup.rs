@@ -10,7 +10,7 @@ use std::path::Path;
 
 use mybtrfs_domain::model::{RelationshipGraph, Subvolume};
 use mybtrfs_domain::naming::{TimestampFormat, make_name, next_free_name, parse_name};
-use mybtrfs_domain::parent::{ParentSelection, target_correlates};
+use mybtrfs_domain::parent::{Incremental, ParentSelection, best_parent, target_correlates};
 use mybtrfs_domain::retention::{RetentionPolicy, Schedule};
 use mybtrfs_domain::safety::{SafetyContext, latest_common_pair};
 
@@ -46,9 +46,11 @@ pub struct ResumeReport {
     pub backups_pruned: Schedule<Subvolume>,
 }
 
-/// Orchestrates the backup operations over the driven ports: `snapshot` and the
-/// full-backup `run` (snapshot → send/receive → prune), delegating retention to
-/// [`RetentionService`]. Incremental parent resolution is a later increment.
+/// Orchestrates the backup operations over the driven ports: `snapshot`, `run`
+/// (snapshot → send/receive → prune), and `resume`, delegating retention to
+/// [`RetentionService`]. `run`/`resume` send incrementally (`send -p`, plus any
+/// `-c` clone sources) when a correlated parent exists, per the [`Incremental`]
+/// mode (`Yes` by default).
 pub struct BackupService<'a> {
     clock: &'a dyn ClockPort,
     /// Repository scoped to the **source** filesystem (where snapshots live).
@@ -62,12 +64,16 @@ pub struct BackupService<'a> {
     transfer: &'a dyn TransferPort,
     retention: &'a RetentionService<'a>,
     format: TimestampFormat,
+    /// Incremental-send strategy — `Yes` (use a parent when one exists, else
+    /// full), `Strict` (require a parent), or `No` (always full).
+    incremental: Incremental,
 }
 
 impl<'a> BackupService<'a> {
-    /// Construct a service over the injected clock, the source/target subvolume
-    /// repositories, the snapshot and transfer ports, the retention service, and
-    /// the timestamp format used for snapshot names.
+    /// Construct a service with the default incremental mode ([`Incremental::Yes`]):
+    /// over the injected clock, the source/target subvolume repositories, the
+    /// snapshot and transfer ports, the retention service, and the timestamp
+    /// format used for snapshot names.
     #[must_use]
     pub fn new(
         clock: &'a dyn ClockPort,
@@ -78,6 +84,32 @@ impl<'a> BackupService<'a> {
         retention: &'a RetentionService<'a>,
         format: TimestampFormat,
     ) -> Self {
+        Self::with_incremental(
+            clock,
+            source_repo,
+            target_repo,
+            snapshots,
+            transfer,
+            retention,
+            format,
+            Incremental::Yes,
+        )
+    }
+
+    /// Like [`new`](Self::new) but with an explicit [`Incremental`] mode
+    /// (`Strict` to require a parent, `No` to force full sends).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // composition root; an args-struct would break `new`
+    pub fn with_incremental(
+        clock: &'a dyn ClockPort,
+        source_repo: &'a dyn SubvolumeRepository,
+        target_repo: &'a dyn SubvolumeRepository,
+        snapshots: &'a dyn SnapshotPort,
+        transfer: &'a dyn TransferPort,
+        retention: &'a RetentionService<'a>,
+        format: TimestampFormat,
+        incremental: Incremental,
+    ) -> Self {
         Self {
             clock,
             source_repo,
@@ -86,6 +118,7 @@ impl<'a> BackupService<'a> {
             transfer,
             retention,
             format,
+            incremental,
         }
     }
 
@@ -117,8 +150,8 @@ impl<'a> BackupService<'a> {
     }
 
     /// Full backup cycle: create a read-only snapshot of `source`, send/receive
-    /// it (full) into `target_dir`, then prune backups (`target_policy`) and
-    /// snapshots (`snapshot_policy`).
+    /// it into `target_dir` (incrementally when a correlated parent exists, else
+    /// full), then prune backups (`target_policy`) and snapshots (`snapshot_policy`).
     ///
     /// The just-created snapshot and backup, and the latest common
     /// snapshot/backup pair, are force-preserved (invariants #3/#4) so the next
@@ -140,15 +173,19 @@ impl<'a> BackupService<'a> {
         target_policy: &RetentionPolicy,
     ) -> Result<RunReport, PortError> {
         let snapshot = self.snapshot(source, snapshot_dir, basename)?;
-        let backup =
-            self.transfer
-                .send_receive(&snapshot, &ParentSelection::default(), target_dir)?;
 
-        // Candidate sets: what's on disk now, plus the just-created entries (a
-        // stateless repository may not observe them until the next run). Each set
-        // is read from its own filesystem's repository.
+        // Source snapshots (incl. the new one) and the backups already on target —
+        // each read from its own filesystem's repository — drive parent resolution.
         let snapshots = self.collect_in(self.source_repo, snapshot_dir, &snapshot)?;
-        let backups = self.collect_in(self.target_repo, target_dir, &backup)?;
+        let mut backups = existing_in(self.target_repo, target_dir)?;
+
+        let selection = self.choose_parent(&snapshot, &snapshots, &backups)?;
+        let backup = self
+            .transfer
+            .send_receive(&snapshot, &selection, target_dir)?;
+        if !backups.iter().any(|b| b.id == backup.id) {
+            backups.push(backup.clone());
+        }
 
         // Force-preserve the just-created snapshot and backup; `prune_both` adds
         // the latest common pair.
@@ -172,9 +209,9 @@ impl<'a> BackupService<'a> {
     /// Resume cycle: send/receive an **existing** snapshot (no new snapshot), then
     /// prune. Sends the latest snapshot named for `basename` in `snapshot_dir`
     /// that does **not** yet have a correlated backup on the target (so an already
-    /// backed-up snapshot is never re-sent); if every snapshot is already backed
-    /// up, nothing is transferred. Full send (incremental parent resolution is a
-    /// later increment). Returns a [`ResumeReport`].
+    /// backed-up snapshot is never re-sent), incrementally when a correlated
+    /// parent exists; if every snapshot is already backed up, nothing is
+    /// transferred. Returns a [`ResumeReport`].
     ///
     /// # Errors
     /// Propagates any [`PortError`] from the repositories, transfer, or delete
@@ -207,11 +244,10 @@ impl<'a> BackupService<'a> {
         let mut backup_preserve = HashSet::new();
         let transferred = match &due {
             Some(snapshot) => {
-                let backup = self.transfer.send_receive(
-                    snapshot,
-                    &ParentSelection::default(),
-                    target_dir,
-                )?;
+                let selection = self.choose_parent(snapshot, &snapshots, &backups)?;
+                let backup = self
+                    .transfer
+                    .send_receive(snapshot, &selection, target_dir)?;
                 backup_preserve.insert(backup.id);
                 if !backups.iter().any(|b| b.id == backup.id) {
                     backups.push(backup.clone());
@@ -279,6 +315,31 @@ impl<'a> BackupService<'a> {
         Ok((snapshots_pruned, backups_pruned))
     }
 
+    /// Resolve the incremental parent (and any `-c` clone sources) for `snapshot`:
+    /// the newest source snapshot with a correlated backup on the target, honoring
+    /// the configured [`Incremental`] mode. Returns a full-send selection when
+    /// nothing qualifies (or the mode forbids a parent).
+    ///
+    /// # Errors
+    /// [`PortError::Verification`] if either set carries a duplicate uuid.
+    fn choose_parent(
+        &self,
+        snapshot: &Subvolume,
+        source_snapshots: &[Subvolume],
+        target_backups: &[Subvolume],
+    ) -> Result<ParentSelection, PortError> {
+        let source_graph = RelationshipGraph::build(source_snapshots.to_vec())
+            .map_err(|err| PortError::Verification(err.to_string()))?;
+        let target_graph = RelationshipGraph::build(target_backups.to_vec())
+            .map_err(|err| PortError::Verification(err.to_string()))?;
+        Ok(best_parent(
+            snapshot,
+            &source_graph,
+            &target_graph,
+            self.incremental,
+        ))
+    }
+
     /// List the subvolumes directly in `dir` (via `repo`, scoped to that
     /// directory's filesystem), ensuring `just_created` is included (a stateless
     /// repository may not observe it until the next run).
@@ -331,7 +392,7 @@ mod tests {
 
     use mybtrfs_domain::model::{Subvolume, Uuid};
     use mybtrfs_domain::naming::TimestampFormat;
-    use mybtrfs_domain::parent::ParentSelection;
+    use mybtrfs_domain::parent::{Incremental, ParentSelection};
     use mybtrfs_domain::retention::{PreserveMin, RetentionPolicy};
 
     use crate::backup::BackupService;
@@ -446,17 +507,18 @@ mod tests {
 
     /// The synthetic read-only snapshot a `SnapshotPort` returns post-create.
     fn fake_subvol(path: &Path) -> Subvolume {
-        let uuid = Uuid::parse("11111111-1111-1111-1111-111111111111").expect("valid uuid");
         Subvolume {
             id: 256,
-            uuid: Some(uuid.clone()),
+            uuid: Uuid::parse("11111111-1111-1111-1111-111111111111"),
             parent_uuid: None,
             received_uuid: None,
             generation: 10,
             cgen: 10,
             readonly: true,
             path: path.to_path_buf(),
-            fs_uuid: uuid,
+            // Same source filesystem as the existing snapshots, so an incremental
+            // parent is reachable.
+            fs_uuid: uuid_hex(0),
             mountpoint: PathBuf::from("/mnt/pool"),
         }
     }
@@ -790,7 +852,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let (sent, selection, target) = &calls[0];
         assert_eq!(sent.id, 2);
-        assert!(selection.parent.is_none(), "full send");
+        // S2 is sent incrementally, with its correlated predecessor S1 as parent.
+        assert_eq!(selection.parent.as_ref().map(|p| p.id), Some(1));
         assert_eq!(target, &PathBuf::from("/mnt/drive/host"));
         let transferred = report.transferred.expect("a backup was transferred");
         assert_eq!(transferred.received_uuid, Some(uuid_hex(2)));
@@ -901,5 +964,113 @@ mod tests {
         let calls = transfer.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0.id, 1, "sent the home snapshot, not rootfs");
+    }
+
+    #[test]
+    fn run_uses_correlated_prior_snapshot_as_incremental_parent() {
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        // A prior snapshot (1) with its backup (11) on the target → 1 is a valid parent.
+        let source_repo = FakeRepo {
+            subvols: vec![ro(
+                1,
+                uuid_hex(1),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1200",
+            )],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![ro(
+                11,
+                uuid_hex(11),
+                Some(uuid_hex(1)),
+                "/mnt/drive",
+                "host/home.20240101T1200",
+            )],
+        };
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::new(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+        );
+
+        service
+            .run(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+                Path::new("/mnt/drive/host"),
+                &RetentionPolicy::default(),
+                &RetentionPolicy::default(),
+            )
+            .expect("run succeeds");
+
+        // The new snapshot (256) is sent with the prior snapshot (1) as -p parent.
+        let calls = transfer.calls();
+        assert_eq!(calls.len(), 1);
+        let (sent, selection, _) = &calls[0];
+        assert_eq!(sent.id, 256);
+        assert_eq!(selection.parent.as_ref().map(|p| p.id), Some(1));
+    }
+
+    #[test]
+    fn with_incremental_no_forces_a_full_send_even_when_a_parent_exists() {
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        let source_repo = FakeRepo {
+            subvols: vec![ro(
+                1,
+                uuid_hex(1),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1200",
+            )],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![ro(
+                11,
+                uuid_hex(11),
+                Some(uuid_hex(1)),
+                "/mnt/drive",
+                "host/home.20240101T1200",
+            )],
+        };
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::with_incremental(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+            Incremental::No,
+        );
+
+        service
+            .run(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+                Path::new("/mnt/drive/host"),
+                &RetentionPolicy::default(),
+                &RetentionPolicy::default(),
+            )
+            .expect("run succeeds");
+
+        // Incremental::No → a full send despite an available parent.
+        let calls = transfer.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].1.parent.is_none());
     }
 }
