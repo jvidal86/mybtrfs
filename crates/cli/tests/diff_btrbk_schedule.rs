@@ -160,11 +160,66 @@ fn mybtrfs_preserve_min_latest_keeps_only_the_newest() {
 
 // ===== Gated live oracle diff (root + loopback + a real btrbk) =====
 
+/// A loopback btrfs filesystem mounted at a temp dir, torn down on `Drop` (so a
+/// panicking assertion never leaks a loop device or mount).
+struct Loopback {
+    image: std::path::PathBuf,
+    mnt: std::path::PathBuf,
+    loop_dev: String,
+}
+
+impl Loopback {
+    fn create() -> Self {
+        let image = std::path::PathBuf::from("/tmp/mybtrfs-diff.img");
+        let mnt = std::path::PathBuf::from("/tmp/mybtrfs-diff-mnt");
+        sh("truncate", &["-s", "400M", image.to_str().unwrap()]);
+        sh("mkfs.btrfs", &["-q", image.to_str().unwrap()]);
+        std::fs::create_dir_all(&mnt).unwrap();
+        let loop_dev = sh("losetup", &["--find", "--show", image.to_str().unwrap()])
+            .trim()
+            .to_owned();
+        sh("mount", &[&loop_dev, mnt.to_str().unwrap()]);
+        Self {
+            image,
+            mnt,
+            loop_dev,
+        }
+    }
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("umount").arg(&self.mnt).status();
+        let _ = std::process::Command::new("losetup")
+            .args(["-d", &self.loop_dev])
+            .status();
+        let _ = std::fs::remove_dir_all(&self.mnt);
+        let _ = std::fs::remove_file(&self.image);
+    }
+}
+
+/// Run `program args…`, asserting success; returns captured stdout.
+fn sh(program: &str, args: &[&str]) -> String {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `{program}`: {e}"));
+    assert!(
+        out.status.success(),
+        "`{program} {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 #[test]
 #[ignore = "needs root/loopback + a real btrbk via MYBTRFS_BTRBK; see documentation/06-differential-oracle-test-spec.md. Written but unvalidated in the CI sandbox."]
 fn oracle_schedule_diff_against_btrbk() {
-    // Absolute path to the reference btrbk (the 06 spec invokes it by path, not
-    // on PATH). Absent → skip cleanly: this gate cannot run without it.
+    use chrono::{Duration, Local, Timelike};
+
+    // Absolute path to the reference btrbk (the 06 spec invokes it by path, not on
+    // PATH). Absent → skip cleanly: this gate cannot run without it.
     let Ok(btrbk) = std::env::var("MYBTRFS_BTRBK") else {
         eprintln!("skipping: set MYBTRFS_BTRBK=/abs/path/to/btrbk to run the diff");
         return;
@@ -174,24 +229,76 @@ fn oracle_schedule_diff_against_btrbk() {
         "MYBTRFS_BTRBK does not point at a file: {btrbk}"
     );
 
-    // ONE scenario drives both schedulers. Snapshots are placed at whole-day
-    // offsets from a single shared `now` (faketime-free determinism): both tools
-    // read wall-clock within the same second, so coarse-tier decisions agree.
-    //
-    // Steps the gated environment performs (mirroring the e2e loopback setup):
-    //   1. mkfs.btrfs on a loopback image; create the timestamped subvolumes
-    //      `home.<day0>`, `home.<-1d>`, `home.<-2d>`, … under btrbk's snapshot_dir;
-    //   2. write a btrbk config pinning timestamp_format + the same retention tiers;
-    //   3. run `btrbk -c <conf> -n -S --format raw run` and parse stdout via
-    //      `btrbk_schedule_survivors`;
-    //   4. run `mybtrfs_survivors(<same names>, <same policy>, now)`;
-    //   5. assert the two survivor sets are equal.
-    //
-    // Steps 3–4 reuse the always-on helpers above; only the loopback set-up (1–2)
-    // is environment-gated, so this body stays a thin, documented driver.
-    unimplemented!(
-        "btrbk at {btrbk} is ready; provide the root/loopback controlled set \
-         (06 spec §A), then compare btrbk_schedule_survivors(...) to \
-         mybtrfs_survivors(...)"
+    let lo = Loopback::create();
+
+    // Faketime-free determinism: place snapshots at whole-day offsets from one
+    // shared `now` pinned to noon (well off the midnight boundary), so the
+    // sub-second skew between btrbk's wall clock and our injected clock can never
+    // flip a day-tier decision.
+    let now = Local::now()
+        .with_hour(12)
+        .and_then(|t| t.with_minute(0))
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .expect("noon is a valid time")
+        .naive_local();
+
+    // Three daily snapshots (now, now-1d, now-2d) named in btrbk's `long` format.
+    let snap_dir = lo.mnt.join("btrbk_snapshots");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let mut names = Vec::new();
+    for days in 0..3i64 {
+        let ts = now - Duration::days(days);
+        let name = format!("home.{}", ts.format("%Y%m%dT%H%M"));
+        let path = snap_dir.join(&name);
+        sh("btrfs", &["subvolume", "create", path.to_str().unwrap()]);
+        sh(
+            "btrfs",
+            &["property", "set", path.to_str().unwrap(), "ro", "true"],
+        );
+        names.push(name);
+    }
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    // Retention: keep the two most recent daily snapshots (prune the oldest). The
+    // SAME policy strings feed both schedulers.
+    let (preserve_min, preserve) = ("no", "2d");
+    let conf = lo.mnt.join("btrbk.conf");
+    std::fs::write(
+        &conf,
+        format!(
+            "timestamp_format long\n\
+             snapshot_dir btrbk_snapshots\n\
+             snapshot_preserve_min {preserve_min}\n\
+             snapshot_preserve {preserve}\n\
+             volume {}\n  \
+               subvolume home\n",
+            lo.mnt.display()
+        ),
+    )
+    .unwrap();
+
+    // Oracle: btrbk's schedule decision (`-n -S` = dry-run, schedule-only).
+    let raw = sh(
+        &btrbk,
+        &[
+            "-c",
+            conf.to_str().unwrap(),
+            "-n",
+            "-S",
+            "--format",
+            "raw",
+            "run",
+        ],
+    );
+    let btrbk_keep = btrbk_schedule_survivors(&raw);
+
+    // Subject: mybtrfs's domain scheduler over the same names + policy + now.
+    let policy = RetentionPolicy::parse(preserve_min, preserve).unwrap();
+    let mybtrfs_keep = mybtrfs_survivors(&name_refs, &policy, now);
+
+    assert_eq!(
+        btrbk_keep, mybtrfs_keep,
+        "scheduler survivor sets must match\n  btrbk:   {btrbk_keep:?}\n  mybtrfs: {mybtrfs_keep:?}"
     );
 }
