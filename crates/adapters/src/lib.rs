@@ -31,6 +31,10 @@ pub use local_fs::LocalFsAdapter;
 /// (`--yes`/non-interactive — auto-confirm, auto-resolve a single choice).
 pub use prompter::{AutoPrompter, StdioPrompter};
 
+/// Journals: [`FileJournal`] (append-only audit file) and [`NullJournal`] (no-op
+/// default when no journal is configured).
+pub use journal::{FileJournal, NullJournal};
+
 /// Initialize `env_logger` once for unit tests (idempotent; safe to call from
 /// every `#[test]`). Logs go through the test harness and appear only for
 /// failing tests unless `--nocapture` is passed.
