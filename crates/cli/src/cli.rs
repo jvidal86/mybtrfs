@@ -26,10 +26,55 @@ use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
 
-/// Process exit codes (central table — RULES rule 14).
+/// Process exit codes (central table — RULES rule 14), mirroring btrbk's scheme.
 mod exit_code {
-    /// A command failed.
+    /// A generic command failure.
     pub const FAILURE: u8 = 1;
+    /// A usage / bad-argument error (also what clap emits on a parse error).
+    pub const USAGE: u8 = 2;
+    /// The repository lock is held by another run.
+    pub const LOCK_BUSY: u8 = 3;
+    /// At least one backup task aborted while others succeeded (multi-target;
+    /// reserved — single-target runs either fully succeed or fully fail).
+    #[allow(dead_code)]
+    pub const PARTIAL_ABORT: u8 = 10;
+}
+
+/// A usage / bad-argument error surfaced during dispatch (mapped to
+/// [`exit_code::USAGE`]) — distinguishes "you gave a bad value" from a runtime
+/// failure so scripts can branch on the exit code.
+#[derive(Debug)]
+struct UsageError(String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// The lock is held by a concurrent run (mapped to [`exit_code::LOCK_BUSY`]).
+#[derive(Debug)]
+struct LockBusy(String);
+
+impl std::fmt::Display for LockBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LockBusy {}
+
+/// Map a dispatch error to its process exit code (see [`exit_code`]).
+fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if err.downcast_ref::<UsageError>().is_some() {
+        exit_code::USAGE
+    } else if err.downcast_ref::<LockBusy>().is_some() {
+        exit_code::LOCK_BUSY
+    } else {
+        exit_code::FAILURE
+    }
 }
 
 /// `mybtrfs` — a backup tool for btrfs subvolumes (a Rust reimagining of btrbk).
@@ -188,8 +233,10 @@ impl RetentionArgs {
 
 /// Parse a single retention policy, mapping a malformed spec to a user-facing error.
 fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
-    RetentionPolicy::parse(preserve_min, preserve).with_context(|| {
-        format!("invalid retention policy (preserve_min={preserve_min:?}, preserve={preserve:?})")
+    RetentionPolicy::parse(preserve_min, preserve).map_err(|err| {
+        anyhow::Error::new(UsageError(format!(
+            "invalid retention policy (preserve_min={preserve_min:?}, preserve={preserve:?}): {err}"
+        )))
     })
 }
 
@@ -202,7 +249,7 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");
-            ExitCode::from(exit_code::FAILURE)
+            ExitCode::from(exit_code_for(&err))
         }
     }
 }
@@ -802,6 +849,22 @@ mod tests {
     fn resolve_target_drive_errors_when_nothing_selected() {
         let drives = FakeDrives(vec![drive("/mnt/a")]);
         assert!(resolve_target_drive(&drives, &ChoosePrompter(None)).is_err());
+    }
+
+    #[test]
+    fn exit_code_distinguishes_usage_lock_and_failure() {
+        let usage = anyhow::Error::new(UsageError("bad value".to_owned()));
+        assert_eq!(exit_code_for(&usage), exit_code::USAGE);
+        let lock = anyhow::Error::new(LockBusy("held".to_owned()));
+        assert_eq!(exit_code_for(&lock), exit_code::LOCK_BUSY);
+        let generic = anyhow::anyhow!("boom");
+        assert_eq!(exit_code_for(&generic), exit_code::FAILURE);
+    }
+
+    #[test]
+    fn malformed_retention_spec_is_a_usage_error() {
+        let err = parse_policy("all", "7x").unwrap_err();
+        assert_eq!(exit_code_for(&err), exit_code::USAGE);
     }
 
     #[test]
