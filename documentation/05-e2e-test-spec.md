@@ -273,8 +273,11 @@ timestamps.
 - **Then** the exact intended operations are printed; no subvolume is created,
   moved, or deleted.
 
-### E2E-P4-06 — restore is incremental when a common parent exists on the pool
-**Spec:** 01 Phase 4 behavior.
+### E2E-P4-06 — restore is incremental when a common parent exists on the pool *(deferred refinement)*
+**Spec:** 01 Phase 4 behavior. *Transfer-back is currently a **full** send/receive
+(decision ID-5) — correct and always applicable, but not delta-optimized. Restores
+are infrequent, so the full send is an acceptable simplification; this scenario
+tracks the future incremental refinement.*
 - **Given** an older snapshot of the data still present on POOL.
 - **When** `restore` runs.
 - **Then** the transfer back uses that parent (delta), and the result is correct.

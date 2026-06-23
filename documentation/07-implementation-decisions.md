@@ -92,3 +92,41 @@ invariant #8) never contend. A lock already held maps to `LockBusy` → exit cod
 `command_mutates`/`acquire_lock` in `crates/cli/src/cli.rs`; the guard is held for
 the lifetime of `dispatch`. Requires Rust **1.89** (`File::try_lock`). Tested
 in-process (two OFDs on one path conflict) and via `exit_code_for`.
+
+---
+
+## ID-5 — Restore transfer-back: mountpoint-prefix detection, full send, verify-then-clean
+
+**Date:** 2026-06-23 · **Source:** implementing Phase 4 transfer-back (item 7).
+
+**Context.** A backup that lives only on a different filesystem (the external
+drive) cannot be made writable in place — `btrfs subvolume snapshot` works within
+one filesystem. Such a backup must be sent/received onto the destination
+filesystem first. `RestoreService` had to decide *whether* a transfer-back is
+needed, *how* to transfer, and *what* to clean up.
+
+**Decisions.**
+1. **Local-vs-remote by mountpoint prefix, not fs UUID.** `restore` resolves the
+   backup (`repo.show`) and treats `dest` as same-filesystem iff it falls under
+   the backup's mountpoint (`dest.starts_with(backup.mountpoint)`). This needs no
+   new port and no `stat` of the not-yet-existing `dest`. Both misjudgements are
+   **safe**: a wrong "same-fs" makes the cross-filesystem `btrfs snapshot` fail
+   cleanly (no corruption), and a wrong "remote" does a correct, if needless,
+   transfer. (A literal-UUID compare would be marginally more precise but adds a
+   port for no safety gain.)
+2. **Full send, not incremental (for now).** The transfer-back is always a full
+   `send/receive` (`ParentSelection::default()`). Restores are infrequent, so the
+   delta optimization (E2E-P4-06: reuse a common parent already on the pool) isn't
+   worth the graph-building/parent-resolution complexity yet — deferred, tracked
+   by P4-06. Full send is always correct and applicable.
+3. **Verify, then clean up.** The received intermediate copy on the destination
+   filesystem is deleted only **after** the writable result passes its clean-write
+   verification (#7). If verification fails, the staging copy is **kept** so the
+   data stays recoverable (parallel to how `NotCleanWritable` surfaces the
+   move-aside path).
+
+**Enforcement.** `RestoreService` (`crates/application/src/restore.rs`) now takes
+repository + transfer + delete ports; the CLI wires the `btrfs` adapter for all
+three and routes the staging cleanup through the logging deleter (ID-1). Tested
+with fakes: remote restore transfers → makes writable → deletes; dry-run plans
+without executing; a non-clean result keeps the staging copy.

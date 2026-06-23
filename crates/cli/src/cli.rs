@@ -384,7 +384,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
         } => {
             let backup = validate_path(backup)?;
             let dest = validate_new_path(dest)?;
-            let report = RestoreService::new(&btrfs, &localfs)
+            // A backup on a different filesystem is transferred back via
+            // send/receive (the `btrfs` adapter serves repo/snapshot/transfer);
+            // the staging-copy cleanup deletes through the logging deleter so it
+            // is visible (decision ID-1).
+            let report = RestoreService::new(&btrfs, &btrfs, &btrfs, &logging_deleter, &localfs)
                 .restore(&backup, &dest, *force, *dry_run)
                 .context("restore failed")?;
             print_restore_report(&report);
@@ -728,8 +732,14 @@ fn print_restore_report(report: &RestoreReport) {
                 moved.display()
             );
         }
+        if report.transferred_back {
+            println!("would transfer the backup back from its remote filesystem first");
+        }
         println!("would restore to: {}", report.dest.display());
         return;
+    }
+    if report.transferred_back {
+        println!("transferred the backup back from its remote filesystem");
     }
     match &report.restored {
         Some(restored) => println!(
