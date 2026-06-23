@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
-use mybtrfs_application::backup::{BackupService, RunReport};
+use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
+use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
 use mybtrfs_application::ports::{
     DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
 };
@@ -58,8 +59,15 @@ enum Command {
         /// Target directory on the backup filesystem.
         target_dir: PathBuf,
     },
-    /// Re-send an existing snapshot without creating a new one (Phase 2).
-    Resume,
+    /// Re-send the latest not-yet-backed-up snapshot without creating a new one.
+    Resume {
+        /// Directory holding the source-side snapshots.
+        snapshot_dir: PathBuf,
+        /// Base name of the snapshot series to resume.
+        basename: String,
+        /// Target directory on the backup filesystem.
+        target_dir: PathBuf,
+    },
     /// Prune snapshots/backups per retention policy (Phase 3).
     Prune,
     /// Restore a backup to a writable subvolume at `dest` (Phase 4).
@@ -72,10 +80,20 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// List subvolumes (Phase 3).
-    List,
-    /// Show backup statistics (Phase 3).
-    Stats,
+    /// List source snapshots with their correlated backups (Phase 3).
+    List {
+        /// Directory holding the source-side snapshots.
+        snapshot_dir: PathBuf,
+        /// Target directory on the backup filesystem.
+        target_dir: PathBuf,
+    },
+    /// Show aggregate backup statistics (Phase 3).
+    Stats {
+        /// Directory holding the source-side snapshots.
+        snapshot_dir: PathBuf,
+        /// Target directory on the backup filesystem.
+        target_dir: PathBuf,
+    },
     /// List candidate backup drives (Phase 1 UX).
     ListDrives,
 }
@@ -183,7 +201,51 @@ fn dispatch(command: &Command) -> Result<()> {
             }
             Ok(())
         }
-        Command::Resume | Command::Prune | Command::List | Command::Stats => {
+        Command::List {
+            snapshot_dir,
+            target_dir,
+        } => {
+            let snapshot_dir = validate_path(snapshot_dir)?;
+            let target_dir = validate_path(target_dir)?;
+            let inventory = InventoryService::new(&btrfs, &btrfs)
+                .list(&snapshot_dir, &target_dir)
+                .context("listing the inventory failed")?;
+            print_inventory(&inventory);
+            Ok(())
+        }
+        Command::Stats {
+            snapshot_dir,
+            target_dir,
+        } => {
+            let snapshot_dir = validate_path(snapshot_dir)?;
+            let target_dir = validate_path(target_dir)?;
+            let stats = InventoryService::new(&btrfs, &btrfs)
+                .stats(&snapshot_dir, &target_dir)
+                .context("computing statistics failed")?;
+            print_stats(&stats);
+            Ok(())
+        }
+        Command::Resume {
+            snapshot_dir,
+            basename,
+            target_dir,
+        } => {
+            let snapshot_dir = validate_path(snapshot_dir)?;
+            let target_dir = validate_path(target_dir)?;
+            // Keep-all retention by default (policy flags arrive in Phase 3).
+            let report = backup
+                .resume(
+                    &snapshot_dir,
+                    basename,
+                    &target_dir,
+                    &RetentionPolicy::default(),
+                    &RetentionPolicy::default(),
+                )
+                .context("resume failed")?;
+            print_resume_report(&report);
+            Ok(())
+        }
+        Command::Prune => {
             bail!("this command is not implemented yet")
         }
     }
@@ -232,6 +294,68 @@ fn print_run_report(report: &RunReport) {
         report.snapshots_pruned.delete.len(),
         report.backups_pruned.delete.len()
     );
+}
+
+/// Print a one-fact-per-line summary of a completed resume.
+fn print_resume_report(report: &ResumeReport) {
+    match &report.transferred {
+        Some(backup) => println!(
+            "transferred: {}",
+            backup.mountpoint.join(&backup.path).display()
+        ),
+        None => println!("nothing to resume: the latest snapshot is already backed up"),
+    }
+    println!(
+        "pruned {} snapshot(s), {} backup(s)",
+        report.snapshots_pruned.delete.len(),
+        report.backups_pruned.delete.len()
+    );
+}
+
+/// Print a one-fact-per-line inventory: each snapshot with its backups, then the
+/// orphaned and incomplete backups.
+fn print_inventory(inventory: &Inventory) {
+    for status in &inventory.snapshots {
+        println!(
+            "snapshot: {}",
+            status
+                .snapshot
+                .mountpoint
+                .join(&status.snapshot.path)
+                .display()
+        );
+        if status.backups.is_empty() {
+            println!("  (no backups)");
+        } else {
+            for backup in &status.backups {
+                println!(
+                    "  backup: {}",
+                    backup.mountpoint.join(&backup.path).display()
+                );
+            }
+        }
+    }
+    for orphan in &inventory.orphan_backups {
+        println!(
+            "orphan backup: {}",
+            orphan.mountpoint.join(&orphan.path).display()
+        );
+    }
+    for incomplete in &inventory.incomplete_backups {
+        println!(
+            "incomplete backup: {}",
+            incomplete.mountpoint.join(&incomplete.path).display()
+        );
+    }
+}
+
+/// Print aggregate backup statistics, one fact per line.
+fn print_stats(stats: &Stats) {
+    println!("snapshots:   {}", stats.snapshots);
+    println!("backups:     {}", stats.backups);
+    println!("correlated:  {}", stats.correlated);
+    println!("orphaned:    {}", stats.orphaned);
+    println!("incomplete:  {}", stats.incomplete);
 }
 
 /// Print the discovered btrfs filesystems (backup-target candidates).
@@ -311,5 +435,40 @@ mod tests {
     fn snapshot_requires_all_its_arguments() {
         // Missing the basename + snapshot_dir → clap rejects it.
         assert!(Cli::try_parse_from(["mybtrfs", "snapshot", "/only/source"]).is_err());
+    }
+
+    #[test]
+    fn parses_resume_command() {
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "resume",
+            "/mnt/pool/.snapshots",
+            "home",
+            "/mnt/drive/host",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Resume {
+                snapshot_dir,
+                basename,
+                target_dir,
+            } => {
+                assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
+                assert_eq!(basename, "home");
+                assert_eq!(target_dir, PathBuf::from("/mnt/drive/host"));
+            }
+            _ => panic!("expected a Resume command"),
+        }
+    }
+
+    #[test]
+    fn list_and_stats_take_two_dirs() {
+        let list = Cli::try_parse_from(["mybtrfs", "list", "/snap", "/target"]).unwrap();
+        assert!(matches!(list.command, Command::List { .. }));
+        let stats = Cli::try_parse_from(["mybtrfs", "stats", "/snap", "/target"]).unwrap();
+        assert!(matches!(stats.command, Command::Stats { .. }));
+        // Each requires both directories.
+        assert!(Cli::try_parse_from(["mybtrfs", "list", "/snap"]).is_err());
+        assert!(Cli::try_parse_from(["mybtrfs", "stats", "/snap"]).is_err());
     }
 }
