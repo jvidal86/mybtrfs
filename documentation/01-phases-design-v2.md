@@ -311,8 +311,10 @@ stray backup tree.
 - Distinguish *expected* failures (unreachable target, no common parent, missing
   snapshot dir) — reported with actionable messages and meaningful exit codes —
   from *unexpected* ones.
-- Define a small, stable set of exit codes (success / generic error / usage error
-  / partial-abort) for scripting.
+- Define a small, stable set of exit codes for scripting: success `0` / generic
+  error `1` / usage error `2` / lock held `3` / needs-root `4` / partial-abort
+  `10`. (`3`/`4` are mybtrfs additions over the original sketch — decisions
+  ID-4/ID-6; see `07-implementation-decisions.md`.)
 
 ### Security (global)
 - No shell interpolation; arguments passed directly. Absolute-path validation and

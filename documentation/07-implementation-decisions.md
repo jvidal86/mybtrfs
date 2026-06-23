@@ -130,3 +130,29 @@ repository + transfer + delete ports; the CLI wires the `btrfs` adapter for all
 three and routes the staging cleanup through the logging deleter (ID-1). Tested
 with fakes: remote restore transfers → makes writable → deletes; dry-run plans
 without executing; a non-clean result keeps the staging copy.
+
+---
+
+## ID-6 — Exit code 4 for "needs root" (a divergence over the original sketch)
+
+**Date:** 2026-06-23 · **Source:** real-world hand-testing — running the binary
+unprivileged surfaced btrfs "Permission denied" as an opaque generic failure.
+
+**Context.** btrfs ioctls/commands require root; an unprivileged run fails deep in
+the `btrfs` adapter. The original exit-code sketch (`01`, success/generic/usage/
+partial-abort) and btrbk itself fold this into the generic failure code, so a
+cron/script can't tell "you forgot sudo" from a real backup error.
+
+**Decision.** Add a dedicated **exit code `4` (`PermissionDenied`)** — an
+intentional divergence from btrbk, consistent with `01`'s "privilege requirements
+are explicit, never auto-escalated". `is_permission_error` scans the error chain
+for an `io::ErrorKind::PermissionDenied` or a `"Permission denied"` substring
+(catching `PortError::Command` that wraps raw btrfs stderr); when found, dispatch
+re-wraps the error as `PermissionDenied`, which `exit_code_for` maps to `4`. The
+user message is actionable ("re-run with sudo").
+
+**Enforcement / status.** `crates/cli/src/cli.rs` (`exit_code::PERMISSION_DENIED`,
+`struct PermissionDenied`, `is_permission_error`, the `dispatch` re-wrap). Verified
+manually against an unprivileged real run; **not yet covered by an automated test**
+(the string/kind classification in `is_permission_error` and the `exit_code_for`
+mapping are the natural unit-test targets — a follow-up).

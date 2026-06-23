@@ -153,7 +153,16 @@ detection site. Capture the full trace with `RUST_LOG=debug mybtrfs … 2>debug.
 
 Additions/improvements, not oversights: **CLI-first with interactive drive
 auto-detection** (btrbk is config-file-driven); **automated restore** (btrbk
-leaves it manual); **hard-refuse on duplicate UUIDs** (btrbk only warns).
+leaves it manual, and mybtrfs additionally *transfers a remote backup back* before
+making it writable — decision ID-5); **hard-refuse on duplicate UUIDs** (btrbk only
+warns); a dedicated **exit code 4 for "needs root"** (`PermissionDenied`, decision
+ID-6) so cron/scripts can tell a privilege problem from a generic failure (btrbk
+has no such code).
+
+Beyond the decided CLI surface, three **global flags** were added: `--yes`
+(non-interactive confirm, for cron), `--journal <PATH>` (append a timestamped audit
+line per invocation — wires the `Journal` port), and `--lock <PATH>` (the run lock,
+decision ID-4).
 
 ## Working style
 

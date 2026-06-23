@@ -332,9 +332,10 @@ tracks the future incremental refinement.*
 ### E2E-CC-08 — exit codes are stable and scriptable
 **Spec:** 01 cross-cutting (exit codes). *(Codes proposed to mirror btrbk —
 pending final confirmation.)*
-- **Then:** success → `0`; usage/parse error → `2`; at least one backup task
-  aborted → `10`; lock held → `3`; other generic failure → `1`. Each asserted in
-  its relevant scenario above.
+- **Then:** success → `0`; usage/parse error → `2`; lock held → `3`; insufficient
+  privileges (needs root) → `4` *(a mybtrfs addition, decision ID-6 — no btrbk
+  equivalent)*; at least one backup task aborted → `10`; other generic failure →
+  `1`. Each asserted in its relevant scenario above.
 
 ### E2E-CC-09 — concurrency lock prevents overlapping runs
 **Spec:** robustness (run lock; decision ID-4). Implemented as an advisory
