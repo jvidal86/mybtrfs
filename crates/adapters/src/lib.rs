@@ -9,6 +9,7 @@ pub(crate) mod command;
 pub(crate) mod drive_discovery;
 pub(crate) mod journal;
 pub(crate) mod local_fs;
+pub(crate) mod lock;
 pub(crate) mod mounts;
 pub(crate) mod prompter;
 
@@ -34,6 +35,10 @@ pub use prompter::{AutoPrompter, StdioPrompter};
 /// Journals: [`FileJournal`] (append-only audit file) and [`NullJournal`] (no-op
 /// default when no journal is configured).
 pub use journal::{FileJournal, NullJournal};
+
+/// Concurrency guard: [`FileLock`] — an advisory `flock` serializing mutating
+/// runs (released on drop / process exit).
+pub use lock::FileLock;
 
 /// Initialize `env_logger` once for unit tests (idempotent; safe to call from
 /// every `#[test]`). Logs go through the test harness and appear only for

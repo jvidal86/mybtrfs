@@ -65,3 +65,30 @@ test-support module rather than copying again.
 
 **Enforcement / follow-up.** Apply at the next (third) use-case test that needs a
 `FixedClock`/recording port — e.g. when `resume`/`restore`/CLI tests arrive.
+
+---
+
+## ID-4 — The run lock is a single advisory `flock` at the composition root
+
+**Date:** 2026-06-23 · **Source:** implementing E2E-CC-09 (concurrency lock).
+
+**Context.** Two overlapping `mybtrfs` runs could interleave snapshot creation /
+prune on the same data. btrbk guards against this with a global lockfile. The
+design left the mechanism open ("pending lock decision").
+
+**Decision.** A **process-level advisory lock** (`std::fs::File::try_lock`, an
+exclusive `flock(2)`), acquired at the **CLI composition root** — *not* a port.
+Rationale: it guards the whole invocation, not a single dangerous operation, so it
+doesn't fit the narrow-port model; and `flock` is released by the OS on process
+exit, so a crash never leaves a stale lock (no pidfile/staleness logic needed —
+leaner than the alternative). Scope is a single global lock file (`--lock <PATH>`,
+default `<tmpdir>/mybtrfs.lock`), mirroring btrbk's single-instance model. Only
+**state-changing** commands take it (`run`/`snapshot`/`resume`/committing
+`prune`/`restore`); read-only commands and dry runs (which mutate nothing —
+invariant #8) never contend. A lock already held maps to `LockBusy` → exit code
+`3`; the second run makes no changes.
+
+**Enforcement.** `FileLock` (`crates/adapters/src/lock.rs`, RAII guard) +
+`command_mutates`/`acquire_lock` in `crates/cli/src/cli.rs`; the guard is held for
+the lifetime of `dispatch`. Requires Rust **1.89** (`File::try_lock`). Tested
+in-process (two OFDs on one path conflict) and via `exit_code_for`.

@@ -330,15 +330,17 @@ timestamps.
 **Spec:** 01 cross-cutting (exit codes). *(Codes proposed to mirror btrbk —
 pending final confirmation.)*
 - **Then:** success → `0`; usage/parse error → `2`; at least one backup task
-  aborted → `10`; (if the lock feature is adopted) lock held → `3`; other
-  generic failure → `1`. Each asserted in its relevant scenario above.
+  aborted → `10`; lock held → `3`; other generic failure → `1`. Each asserted in
+  its relevant scenario above.
 
-### E2E-CC-09 — concurrency lock prevents overlapping runs *(pending lock decision)*
-**Spec:** proposed robustness (lockfile).
+### E2E-CC-09 — concurrency lock prevents overlapping runs
+**Spec:** robustness (run lock; decision ID-4). Implemented as an advisory
+`flock` on `--lock <PATH>` (default `<tmpdir>/mybtrfs.lock`), held only by
+state-changing commands (`run`/`snapshot`/`resume`/committing `prune`/`restore`).
 - **Given** one `mybtrfs` run holding the lock.
 - **When** a second `mybtrfs` starts.
-- **Then** the second exits immediately with the lock-busy code and makes no
-  changes.
+- **Then** the second exits immediately with the lock-busy code (`3`) and makes
+  no changes.
 
 ### E2E-CC-10 — timezone-independent determinism
 **Spec:** 02 §6 row 11; 01 Phase 3 (TZ as input).

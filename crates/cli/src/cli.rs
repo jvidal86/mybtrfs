@@ -11,8 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use mybtrfs_adapters::{
-    AutoPrompter, BtrfsCliAdapter, FileJournal, LocalFsAdapter, LsblkDriveDiscovery, NullJournal,
-    StdioPrompter, SystemClock,
+    AutoPrompter, BtrfsCliAdapter, FileJournal, FileLock, LocalFsAdapter, LsblkDriveDiscovery,
+    NullJournal, StdioPrompter, SystemClock,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
@@ -91,6 +91,10 @@ struct Cli {
     /// Append a timestamped audit line for this invocation to the given file.
     #[arg(long, global = true, value_name = "PATH")]
     journal: Option<PathBuf>,
+    /// Lock file serializing mutating runs (default: `<tmpdir>/mybtrfs.lock`). A
+    /// second run that finds it held exits immediately with code 3.
+    #[arg(long, global = true, value_name = "PATH")]
+    lock: Option<PathBuf>,
 }
 
 /// The command set (see `documentation/01`). Phase 1 implements `snapshot` and
@@ -282,6 +286,14 @@ fn dispatch(cli: &Cli) -> Result<()> {
     )) {
         log::warn!("could not write to journal: {err}");
     }
+    // Serialize mutating runs behind a process lock (E2E-CC-09); read-only and
+    // dry-run commands don't contend. Held until dispatch returns — the OS frees
+    // it on exit, so even a crash leaves no stale lock.
+    let _lock = if command_mutates(&cli.command) {
+        Some(acquire_lock(cli.lock.as_deref())?)
+    } else {
+        None
+    };
     // The committing retention service deletes through `btrfs`, but logs each
     // deletion here so partial progress is visible if a fail-fast prune aborts
     // mid-loop (decision ID-1). The dry-run path keeps its own `DryRunDeletePort`.
@@ -507,6 +519,39 @@ fn ensure_dir(fs: &dyn FilesystemPort, prompter: &dyn Prompter, dir: &Path) -> R
     }
     fs.create_dir_all(dir)?;
     Ok(())
+}
+
+/// Whether a command changes filesystem state (and so must hold the run lock).
+/// Dry runs mutate nothing (invariant #8) and read-only commands never contend,
+/// so neither takes the lock. Exhaustive on purpose: a new command forces a
+/// deliberate choice here.
+fn command_mutates(command: &Command) -> bool {
+    match command {
+        Command::Run { .. } | Command::Snapshot { .. } | Command::Resume { .. } => true,
+        Command::Prune { dry_run, .. } | Command::Restore { dry_run, .. } => !dry_run,
+        Command::List { .. } | Command::Stats { .. } | Command::ListDrives => false,
+    }
+}
+
+/// The run-lock path: the `--lock` override, or a default under the temp dir.
+fn lock_path(override_path: Option<&Path>) -> PathBuf {
+    override_path.map_or_else(
+        || std::env::temp_dir().join("mybtrfs.lock"),
+        Path::to_path_buf,
+    )
+}
+
+/// Acquire the run lock, mapping a lock already held by another run to
+/// [`LockBusy`] (process exit code 3).
+fn acquire_lock(override_path: Option<&Path>) -> Result<FileLock> {
+    let path = lock_path(override_path);
+    match FileLock::acquire(&path)? {
+        Some(lock) => Ok(lock),
+        None => Err(anyhow::Error::new(LockBusy(format!(
+            "another mybtrfs run holds the lock: {}",
+            path.display()
+        )))),
+    }
 }
 
 /// Canonicalize and validate a path before handing it to the use cases
@@ -933,6 +978,54 @@ mod tests {
     fn malformed_retention_spec_is_a_usage_error() {
         let err = parse_policy("all", "7x").unwrap_err();
         assert_eq!(exit_code_for(&err), exit_code::USAGE);
+    }
+
+    #[test]
+    fn only_mutating_commands_take_the_run_lock() {
+        let mutates = |args: &[&str]| command_mutates(&Cli::try_parse_from(args).unwrap().command);
+        // State-changing commands must serialize behind the lock.
+        assert!(mutates(&["mybtrfs", "run", "/p/home", "/p/.snap", "home"]));
+        assert!(mutates(&[
+            "mybtrfs", "snapshot", "/p/home", "/p/.snap", "home"
+        ]));
+        assert!(mutates(&["mybtrfs", "resume", "/snap", "home", "/target"]));
+        assert!(mutates(&["mybtrfs", "prune", "/snap", "/target"]));
+        assert!(mutates(&["mybtrfs", "restore", "/backup", "/dest"]));
+        // Dry runs change nothing, and read-only commands never contend.
+        assert!(!mutates(&[
+            "mybtrfs",
+            "prune",
+            "/snap",
+            "/target",
+            "--dry-run"
+        ]));
+        assert!(!mutates(&[
+            "mybtrfs",
+            "restore",
+            "/backup",
+            "/dest",
+            "--dry-run"
+        ]));
+        assert!(!mutates(&["mybtrfs", "list", "/snap", "/target"]));
+        assert!(!mutates(&["mybtrfs", "stats", "/snap", "/target"]));
+        assert!(!mutates(&["mybtrfs", "list-drives"]));
+    }
+
+    #[test]
+    fn acquire_lock_maps_a_held_lock_to_the_lock_busy_code() {
+        let path = std::env::temp_dir().join(format!(
+            "mybtrfs-cli-lock-{}.lock",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // The first acquisition holds the lock for the rest of the test.
+        let _held = acquire_lock(Some(path.as_path())).unwrap();
+        // A concurrent acquisition is rejected as lock-busy (→ exit code 3).
+        let err = acquire_lock(Some(path.as_path())).unwrap_err();
+        assert_eq!(exit_code_for(&err), exit_code::LOCK_BUSY);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
