@@ -369,6 +369,50 @@ TZ=UTC faketime '2026-06-22 15:31:00' ../btrbk/btrbk/btrbk -c test.conf -q run
 
 ---
 
+## Implementation notes — confirmed from btrbk source (T1 buildability)
+
+Confirmed by reading `../btrbk/btrbk/btrbk` (line refs below); these tighten the
+spec above into something directly implementable.
+
+- **`btrbk --format raw` line shape** (`print_formatted` raw branch, btrbk:4970-4977):
+  each row is one self-describing line
+  `format="<table_key>" col0='v0' col1='v1' …`. The `format=` value uses *double*
+  quotes; every column value is *single*-quoted via `quoteshell` (btrbk:761-764):
+  internal `'` → `'\''`, and empty/undef → `''` (the table/long `-` empty-cell char
+  does **not** apply to raw). A parser must handle both quote styles and the
+  `'\''` escape.
+- **Schedule raw columns** (btrbk:237): `topic action url host port path hod dow min h d w m y`.
+  Beware: `h`/`d`/`w`/`m`/`y` are the hourly/daily/weekly/monthly/yearly **counts**,
+  `hod` is hour-of-day, `dow` is day-of-week (e.g. `'sunday'`), and `min` is the
+  preserve-min **string** (`'all'`/`'latest'`/`'no'`/`'2d'`). Schedule rows are only
+  emitted by the run/clean/archive path and are gated behind `unless($quiet)`
+  (btrbk:6965) — so use `-S` **without** `-q`; `list`/`stats` never emit them.
+- **GOTCHA — `-n -S` still touches btrfs.** `-n` only skips *destructive* commands
+  (`run_cmd` btrbk:921-924); snapshot discovery (`btrfs subvolume list -a -c -u -q -R`,
+  btrbk:1236), `subvolume show`, and `filesystem show` are `non_destructive => 1` and
+  run even under dry-run. There is **no** hook to feed snapshot names into the
+  scheduler — it always reads live subvolumes. So the T1 oracle needs **either** a
+  real btrfs mount **or** a **PATH-shimmed fake `btrfs`** returning canned
+  `subvolume list`/`show`/`filesystem show` output. The exact set of subcommands the
+  shim must satisfy (and the formats btrbk's parser expects from each) must be pinned
+  against a live btrbk — this is the main remaining unknown and why T1 is *not* a
+  zero-cost, sandbox-only build.
+- **Determinism:** wrap btrbk in `TZ=<fixed> faketime '<instant>' …` (`libfaketime`);
+  btrbk reads wall-clock once at startup and has no `--now`. `--override KEY=VALUE`
+  (btrbk:5476-5486) forces config options from the CLI.
+- **mybtrfs side is library-direct and sandbox-verifiable:** the subject's survivor
+  set comes from `mybtrfs_domain::retention::{schedule, RetentionPolicy}` (no CLI, no
+  btrfs), so that half can be unit-tested today; only the btrbk-oracle half needs the
+  shim + faketime + root-ish setup.
+
+A runner scaffold lives at `scripts/run-diff-btrbk.sh` (gated by
+`MYBTRFS_TEST_SANDBOX`, points at the local btrbk checkout, and is where the
+fake-`btrfs` shim is wired). The Rust harness itself is deferred until it can be
+developed against a live btrbk (writing the shim blind risks silently mismatching
+btrbk's expected `subvolume list` format).
+
+---
+
 ## Verification (how we'll know the harness itself is right)
 
 1. **Oracle self-consistency:** run btrbk twice on identical clones under the same faketime
