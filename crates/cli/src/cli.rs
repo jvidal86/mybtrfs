@@ -7,13 +7,16 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
-use mybtrfs_application::ports::{DiscoveredFilesystem, DriveDiscoveryPort};
+use mybtrfs_application::ports::{
+    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
+};
+use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::RestoreService;
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
@@ -347,10 +350,24 @@ fn dispatch(command: &Command) -> Result<()> {
             // The returned schedule still lists what *would* be deleted.
             let report = if *dry_run {
                 let deleter = DryRunDeletePort;
-                let retention = RetentionService::new(&clock, &deleter);
-                prune_with(&clock, &btrfs, &retention, &snapshot_dir, &target_dir, &snapshot_policy, &target_policy)
+                let dry_retention = RetentionService::new(&clock, &deleter);
+                prune_with(
+                    &btrfs,
+                    &dry_retention,
+                    &snapshot_dir,
+                    &target_dir,
+                    &snapshot_policy,
+                    &target_policy,
+                )
             } else {
-                prune_with(&clock, &btrfs, &retention, &snapshot_dir, &target_dir, &snapshot_policy, &target_policy)
+                prune_with(
+                    &btrfs,
+                    &retention,
+                    &snapshot_dir,
+                    &target_dir,
+                    &snapshot_policy,
+                    &target_policy,
+                )
             }
             .context("prune failed")?;
             print_prune_report(&report, *dry_run);
@@ -359,11 +376,11 @@ fn dispatch(command: &Command) -> Result<()> {
     }
 }
 
-/// Build a `BackupService` over the given retention service and run a standalone
-/// prune. Factored out so the dry-run and committing paths share one call site
-/// while each supplies its own delete port (via `retention`).
+/// Run a standalone prune via [`PruneService`] over the given retention service.
+/// Factored out so the dry-run and committing paths share one call site while
+/// each supplies its own delete port (via `retention`). One resolve-per-path
+/// `btrfs` adapter serves as both source and target repository.
 fn prune_with(
-    clock: &SystemClock,
     btrfs: &BtrfsCliAdapter,
     retention: &RetentionService<'_>,
     snapshot_dir: &Path,
@@ -371,18 +388,12 @@ fn prune_with(
     snapshot_policy: &RetentionPolicy,
     target_policy: &RetentionPolicy,
 ) -> Result<PruneReport, PortError> {
-    // Incremental mode is irrelevant to prune (it never transfers).
-    BackupService::with_incremental(
-        clock,
-        btrfs,
-        btrfs,
-        btrfs,
-        btrfs,
-        retention,
-        TimestampFormat::Long,
-        Incremental::Yes,
+    PruneService::new(btrfs, btrfs, retention).prune(
+        snapshot_dir,
+        target_dir,
+        snapshot_policy,
+        target_policy,
     )
-    .prune(snapshot_dir, target_dir, snapshot_policy, target_policy)
 }
 
 /// Canonicalize and validate a path before handing it to the use cases
@@ -526,6 +537,18 @@ fn print_drives(drives: &[DiscoveredFilesystem]) {
     }
 }
 
+/// A [`DeletePort`] for `--dry-run`: reports each would-be deletion and deletes
+/// nothing. The returned retention schedule still lists what *would* go, so the
+/// caller's counts are accurate.
+struct DryRunDeletePort;
+
+impl DeletePort for DryRunDeletePort {
+    fn delete(&self, path: &Path, _commit: DeleteCommit) -> Result<(), PortError> {
+        println!("would delete: {}", path.display());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -666,5 +689,40 @@ mod tests {
         // Each requires both directories.
         assert!(Cli::try_parse_from(["mybtrfs", "list", "/snap"]).is_err());
         assert!(Cli::try_parse_from(["mybtrfs", "stats", "/snap"]).is_err());
+    }
+
+    #[test]
+    fn parses_prune_command_with_dry_run_and_retention() {
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "prune",
+            "/snap",
+            "/target",
+            "--dry-run",
+            "--snapshot-preserve",
+            "7d 4w",
+        ])
+        .unwrap();
+        let Command::Prune {
+            snapshot_dir,
+            target_dir,
+            dry_run,
+            retention,
+        } = cli.command
+        else {
+            panic!("expected a Prune command");
+        };
+        assert_eq!(snapshot_dir, PathBuf::from("/snap"));
+        assert_eq!(target_dir, PathBuf::from("/target"));
+        assert!(dry_run);
+        assert_eq!(retention.snapshot_preserve, "7d 4w");
+        assert!(retention.snapshot_policy().is_ok());
+        // dry_run defaults off and both directories are required.
+        let plain = Cli::try_parse_from(["mybtrfs", "prune", "/snap", "/target"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Prune { dry_run: false, .. }
+        ));
+        assert!(Cli::try_parse_from(["mybtrfs", "prune", "/snap"]).is_err());
     }
 }

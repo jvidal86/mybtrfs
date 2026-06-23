@@ -1193,7 +1193,10 @@ mod tests {
             .expect("prune succeeds");
 
         // A standalone prune neither snapshots nor transfers.
-        assert!(snapshots.readonly_calls().is_empty(), "prune creates nothing");
+        assert!(
+            snapshots.readonly_calls().is_empty(),
+            "prune creates nothing"
+        );
         assert!(transfer.calls().is_empty(), "prune transfers nothing");
         // Both uncorrelated orphans are deleted under the aggressive policy.
         let snap_delete: Vec<u64> = report
