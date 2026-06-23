@@ -85,7 +85,14 @@ two transports and `--target-preserve …` applies to an `ssh://` target. **Vali
 end-to-end 2026-06-23** (smoke-test phase 2): a second backup under
 `--target-preserve-min latest` deleted the older backup over ssh and its source
 snapshot locally (`pruned 1 snapshot(s), 1 backup(s)`).
-**Still open:** *restore from* a remote source (the reverse pipe).
+
+**Restore from a remote** source is implemented too — `mybtrfs restore
+ssh://user@host/path <dest>`. The transfer direction flips (remote send | local
+receive): `SshSourceRunner` wraps only the *producer* (`btrfs send` of the remote
+backup) in ssh, the local `btrfs receive` + make-writable + staging cleanup stay
+local, and `RestoreService` gains a `dest_repo` so the backup's (remote) and the
+destination's (local) filesystems are listed through their own adapters. So §2 is
+**feature-complete**: backup, incremental, prune, and restore all work over ssh.
 
 ---
 
