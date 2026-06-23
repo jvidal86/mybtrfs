@@ -5,7 +5,9 @@
 # Makes a tiny THROWAWAY loopback btrfs source and, against a remote btrfs target
 # over ssh: (phase 1) backs it up and verifies the received subvolume is a real
 # backup (readonly + Received UUID); (phase 2) backs it up again under
-# --target-preserve-min latest and verifies the older backup was pruned *over ssh*.
+# --target-preserve-min latest and verifies the older backup was pruned *over ssh*;
+# (phase 3) restores the surviving backup *from* the remote and verifies the
+# content matches and the result is a clean writable subvolume (no received_uuid).
 # Cleans up the local source afterwards. Touches no real data.
 #
 #   sudo contrib/test/mybtrfs-ssh-smoke.sh
@@ -154,7 +156,32 @@ printf '%s\n' "$out2" | grep -qiE "pruned [0-9]+ snapshot\(s\), [1-9]" \
   || die "the run report does not show a pruned backup:
 $out2"
 
+# ---- phase 3: restore the surviving backup FROM the remote, verify content ----
+survivor="$(remote_backups | sort | tail -1)"
+[ -n "$survivor" ] || die "no surviving backup to restore"
+restored="$MNT/restored"
+info "phase 3: restore  ssh://…${REMOTE_PATH}/$survivor  ->  $restored  (remote send | local receive)"
+set +e
+out3="$("$MYBTRFS" restore "ssh://${REMOTE_USER}@${REMOTE_HOST}${REMOTE_PATH}/$survivor" "$restored" --yes 2>&1)"
+rc3=$?
+set -e
+printf '%s\n' "$out3" | sed 's/^/   /'
+[ "$rc3" -eq 0 ] || die "phase 3 restore exited $rc3 (see output above)"
+
+[ -d "$restored" ] || die "restore produced no subvolume at $restored"
+grep -q "hello mybtrfs over ssh" "$restored/hello.txt" 2>/dev/null \
+  || die "restored content does not match the original (missing/garbled hello.txt)"
+# A clean restore is writable with NO received_uuid (invariant #7).
+rshow="$(btrfs subvolume show "$restored" 2>&1)"
+printf '%s\n' "$rshow" | grep -qiE "Flags:[[:space:]]*readonly" \
+  && die "restored subvolume must be writable, not readonly:
+$rshow"
+printf '%s\n' "$rshow" | grep -iE "Received UUID:[[:space:]]*[0-9a-f]{8}-" >/dev/null \
+  && die "restored subvolume must NOT carry a received_uuid (#7):
+$rshow"
+
 echo
-printf '\033[32mPASS\033[0m — backup + remote prune work end-to-end.\n'
+printf '\033[32mPASS\033[0m — backup, remote prune, and restore-from-remote all work end-to-end.\n'
 echo "  phase 1: $name1 received (readonly + Received UUID)"
 echo "  phase 2: $name1 pruned over ssh; $remaining backup(s) retained on $REMOTE_PATH"
+echo "  phase 3: $survivor restored from the remote to $restored (content matches, writable, no received_uuid)"
