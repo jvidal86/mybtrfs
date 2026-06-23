@@ -17,7 +17,7 @@ use mybtrfs_application::ports::{
     DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
 };
 use mybtrfs_application::prune::{PruneReport, PruneService};
-use mybtrfs_application::restore::RestoreService;
+use mybtrfs_application::restore::{RestoreReport, RestoreService};
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
@@ -98,9 +98,14 @@ enum Command {
         backup: PathBuf,
         /// Where to create the writable restored subvolume.
         dest: PathBuf,
-        /// If `dest` exists, move it aside to `<dest>.broken` instead of refusing.
+        /// If `dest` exists, move it aside to a non-colliding `<dest>.broken[.N]`
+        /// instead of refusing.
         #[arg(long)]
         force: bool,
+        /// Show the intended plan (move-aside + writable snapshot) without
+        /// creating, moving, or deleting anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List source snapshots with their correlated backups (Phase 3).
     List {
@@ -198,7 +203,11 @@ fn dispatch(command: &Command) -> Result<()> {
     let clock = SystemClock;
     let btrfs = BtrfsCliAdapter::new();
     let localfs = LocalFsAdapter::new();
-    let retention = RetentionService::new(&clock, &btrfs);
+    // The committing retention service deletes through `btrfs`, but logs each
+    // deletion here so partial progress is visible if a fail-fast prune aborts
+    // mid-loop (decision ID-1). The dry-run path keeps its own `DryRunDeletePort`.
+    let logging_deleter = LoggingDeletePort::new(&btrfs);
+    let retention = RetentionService::new(&clock, &logging_deleter);
     // One resolve-per-path adapter serves as both source and target repository
     // (it resolves each path's filesystem), plus the snapshot and transfer ports.
     // The incremental mode is per-command, so build the service where it's used.
@@ -270,23 +279,14 @@ fn dispatch(command: &Command) -> Result<()> {
             backup,
             dest,
             force,
+            dry_run,
         } => {
             let backup = validate_path(backup)?;
             let dest = validate_new_path(dest)?;
             let report = RestoreService::new(&btrfs, &localfs)
-                .restore(&backup, &dest, *force)
+                .restore(&backup, &dest, *force, *dry_run)
                 .context("restore failed")?;
-            println!(
-                "restored: {}",
-                report
-                    .restored
-                    .mountpoint
-                    .join(&report.restored.path)
-                    .display()
-            );
-            if let Some(moved) = &report.moved_aside {
-                println!("moved aside existing destination to: {}", moved.display());
-            }
+            print_restore_report(&report);
             Ok(())
         }
         Command::List {
@@ -469,6 +469,31 @@ fn print_prune_report(report: &PruneReport, dry_run: bool) {
     );
 }
 
+/// Print a one-fact-per-line summary of a restore. On a dry run the lines
+/// describe the intended plan (prefixed `would`) and nothing was changed.
+fn print_restore_report(report: &RestoreReport) {
+    if report.dry_run {
+        if let Some(moved) = &report.moved_aside {
+            println!(
+                "would move aside existing destination to: {}",
+                moved.display()
+            );
+        }
+        println!("would restore to: {}", report.dest.display());
+        return;
+    }
+    match &report.restored {
+        Some(restored) => println!(
+            "restored: {}",
+            restored.mountpoint.join(&restored.path).display()
+        ),
+        None => println!("restored: {}", report.dest.display()),
+    }
+    if let Some(moved) = &report.moved_aside {
+        println!("moved aside existing destination to: {}", moved.display());
+    }
+}
+
 /// Print a one-fact-per-line inventory: each snapshot with its backups, then the
 /// orphaned and incomplete backups.
 fn print_inventory(inventory: &Inventory) {
@@ -546,6 +571,32 @@ impl DeletePort for DryRunDeletePort {
     fn delete(&self, path: &Path, _commit: DeleteCommit) -> Result<(), PortError> {
         println!("would delete: {}", path.display());
         Ok(())
+    }
+}
+
+/// A [`DeletePort`] decorator that logs every committing deletion at `info`
+/// (and any failure at `error`) before/while delegating to the wrapped port
+/// (decision ID-1). Wired as the deleter for the committing `RetentionService`
+/// so partial progress is visible at the default `info` level when a fail-fast
+/// prune aborts mid-loop — otherwise the destructive path would be silent while
+/// the safe dry-run path is verbose.
+struct LoggingDeletePort<'a> {
+    inner: &'a dyn DeletePort,
+}
+
+impl<'a> LoggingDeletePort<'a> {
+    /// Wrap `inner`, logging each deletion before delegating to it.
+    fn new(inner: &'a dyn DeletePort) -> Self {
+        Self { inner }
+    }
+}
+
+impl DeletePort for LoggingDeletePort<'_> {
+    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
+        log::info!("deleting: {}", path.display());
+        self.inner.delete(path, commit).inspect_err(|err| {
+            log::error!("delete failed: {} ({err})", path.display());
+        })
     }
 }
 
@@ -724,5 +775,42 @@ mod tests {
             Command::Prune { dry_run: false, .. }
         ));
         assert!(Cli::try_parse_from(["mybtrfs", "prune", "/snap"]).is_err());
+    }
+
+    #[test]
+    fn parses_restore_command_with_force_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "restore",
+            "/mnt/drive/host/home.20240102T1531",
+            "/mnt/pool/home_restored",
+            "--force",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::Restore {
+            backup,
+            dest,
+            force,
+            dry_run,
+        } = cli.command
+        else {
+            panic!("expected a Restore command");
+        };
+        assert_eq!(backup, PathBuf::from("/mnt/drive/host/home.20240102T1531"));
+        assert_eq!(dest, PathBuf::from("/mnt/pool/home_restored"));
+        assert!(force);
+        assert!(dry_run);
+        // Both flags default off and the two positional paths are required.
+        let plain = Cli::try_parse_from(["mybtrfs", "restore", "/backup", "/dest"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Restore {
+                force: false,
+                dry_run: false,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["mybtrfs", "restore", "/backup"]).is_err());
     }
 }
