@@ -27,7 +27,8 @@ use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
 
-/// Process exit codes (central table — RULES rule 14), mirroring btrbk's scheme.
+/// Process exit codes (central table — RULES rule 14). Intentional divergence from btrbk:
+/// adds code 4 for permission errors for better UX in scripts/cron.
 mod exit_code {
     /// A generic command failure.
     pub const FAILURE: u8 = 1;
@@ -35,6 +36,8 @@ mod exit_code {
     pub const USAGE: u8 = 2;
     /// The repository lock is held by another run.
     pub const LOCK_BUSY: u8 = 3;
+    /// The process lacks privileges required by btrfs (run with sudo).
+    pub const PERMISSION_DENIED: u8 = 4;
     /// At least one backup task aborted while others succeeded (multi-target;
     /// reserved — single-target runs either fully succeed or fully fail).
     #[allow(dead_code)]
@@ -67,12 +70,45 @@ impl std::fmt::Display for LockBusy {
 
 impl std::error::Error for LockBusy {}
 
+/// mybtrfs requires root privileges — detected from a "Permission denied" failure
+/// in the btrfs adapter (mapped to [`exit_code::PERMISSION_DENIED`]).
+#[derive(Debug)]
+struct PermissionDenied;
+
+impl std::fmt::Display for PermissionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mybtrfs requires root privileges — re-run with sudo")
+    }
+}
+
+impl std::error::Error for PermissionDenied {}
+
+/// Check if an error chain contains a "Permission denied" signal. Returns true if any
+/// cause is an `std::io::Error` with `PermissionDenied` kind, or if any cause's
+/// display string contains "Permission denied" (catches `PortError::Command` wrapping
+/// raw btrfs stderr).
+fn is_permission_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>()
+            && io_err.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            return true;
+        }
+        if cause.to_string().contains("Permission denied") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Map a dispatch error to its process exit code (see [`exit_code`]).
 fn exit_code_for(err: &anyhow::Error) -> u8 {
     if err.downcast_ref::<UsageError>().is_some() {
         exit_code::USAGE
     } else if err.downcast_ref::<LockBusy>().is_some() {
         exit_code::LOCK_BUSY
+    } else if err.downcast_ref::<PermissionDenied>().is_some() {
+        exit_code::PERMISSION_DENIED
     } else {
         exit_code::FAILURE
     }
@@ -256,6 +292,15 @@ pub fn run() -> ExitCode {
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
+            // Upgrade permission errors to a typed, friendly error so the exit code
+            // is distinct and the message is actionable.
+            let err = if is_permission_error(&err) {
+                anyhow::Error::new(PermissionDenied)
+            } else {
+                err
+            };
+            // Log at error level so the failure is captured in `2>mybtrfs.log`.
+            log::error!("{err:#}");
             eprintln!("error: {err:#}");
             ExitCode::from(exit_code_for(&err))
         }
