@@ -65,8 +65,10 @@ enum Command {
         snapshot_dir: PathBuf,
         /// Base name for the snapshot (a timestamp is appended).
         basename: String,
-        /// Target directory on the backup filesystem.
-        target_dir: PathBuf,
+        /// Target directory on the backup filesystem. If omitted, you are
+        /// prompted to pick a discovered btrfs drive and backups go to
+        /// `<drive-mountpoint>/<hostname>/`.
+        target_dir: Option<PathBuf>,
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
         incremental: IncrementalArg,
@@ -266,9 +268,16 @@ fn dispatch(cli: &Cli) -> Result<()> {
         } => {
             let source = validate_path(source)?;
             ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
-            ensure_dir(&localfs, prompter.as_ref(), target_dir)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
-            let target_dir = validate_path(target_dir)?;
+            // Resolve the target: an explicit directory, or an interactively-picked
+            // drive with a per-host subdirectory (`<mountpoint>/<hostname>/`).
+            let target_dir = match target_dir {
+                Some(dir) => dir.clone(),
+                None => resolve_target_drive(&LsblkDriveDiscovery::new(), prompter.as_ref())?
+                    .join(hostname()),
+            };
+            ensure_dir(&localfs, prompter.as_ref(), &target_dir)?;
+            let target_dir = validate_path(&target_dir)?;
             let snapshot_policy = retention_args.snapshot_policy()?;
             let target_policy = retention_args.target_policy()?;
             let report = backup_with((*incremental).into())
@@ -442,6 +451,46 @@ fn ensure_dir(fs: &dyn FilesystemPort, prompter: &dyn Prompter, dir: &Path) -> R
 fn validate_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("invalid or missing path: {}", path.display()))
+}
+
+/// Resolve a backup-target drive interactively: enumerate mounted btrfs
+/// filesystems and prompt for one. Errors if none are found or none is selected.
+fn resolve_target_drive(
+    discovery: &dyn DriveDiscoveryPort,
+    prompter: &dyn Prompter,
+) -> Result<PathBuf> {
+    let drives = discovery.detect()?;
+    if drives.is_empty() {
+        bail!("no mounted btrfs filesystems found to use as a backup target");
+    }
+    let labels: Vec<String> = drives.iter().map(describe_drive).collect();
+    let choice = prompter
+        .choose("Select a backup drive:", &labels)?
+        .context("no backup drive selected")?;
+    Ok(drives[choice].mountpoint.clone())
+}
+
+/// A one-line description of a discovered drive for the selection menu.
+fn describe_drive(drive: &DiscoveredFilesystem) -> String {
+    format!(
+        "{}  ({}, label={}, fs={})",
+        drive.mountpoint.display(),
+        if drive.removable {
+            "removable"
+        } else {
+            "fixed"
+        },
+        drive.label.as_deref().unwrap_or("-"),
+        drive.fs_uuid,
+    )
+}
+
+/// The local hostname (for the `<hostname>/` target subdirectory); falls back to
+/// `localhost` if it cannot be read.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_owned())
+        .unwrap_or_else(|_| "localhost".to_owned())
 }
 
 /// Validate a not-yet-existing destination (decision ID-2): its parent must
@@ -706,6 +755,55 @@ mod tests {
         assert!(fs.created.borrow().is_empty());
     }
 
+    /// A `DriveDiscoveryPort` returning a fixed drive list.
+    struct FakeDrives(Vec<DiscoveredFilesystem>);
+    impl DriveDiscoveryPort for FakeDrives {
+        fn detect(&self) -> Result<Vec<DiscoveredFilesystem>, PortError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A `Prompter` returning a fixed `choose` result (and auto-confirming).
+    struct ChoosePrompter(Option<usize>);
+    impl Prompter for ChoosePrompter {
+        fn confirm(&self, _prompt: &str) -> Result<bool, PortError> {
+            Ok(true)
+        }
+        fn choose(&self, _prompt: &str, _options: &[String]) -> Result<Option<usize>, PortError> {
+            Ok(self.0)
+        }
+    }
+
+    fn drive(mountpoint: &str) -> DiscoveredFilesystem {
+        DiscoveredFilesystem {
+            device: PathBuf::from("/dev/sdz"),
+            mountpoint: PathBuf::from(mountpoint),
+            fs_uuid: mybtrfs_domain::model::Uuid::parse("ffffffff-ffff-4fff-8fff-ffffffffffff")
+                .unwrap(),
+            label: None,
+            removable: true,
+        }
+    }
+
+    #[test]
+    fn resolve_target_drive_returns_the_chosen_mountpoint() {
+        let drives = FakeDrives(vec![drive("/mnt/a"), drive("/mnt/b")]);
+        let chosen = resolve_target_drive(&drives, &ChoosePrompter(Some(1))).unwrap();
+        assert_eq!(chosen, PathBuf::from("/mnt/b"));
+    }
+
+    #[test]
+    fn resolve_target_drive_errors_with_no_drives() {
+        let drives = FakeDrives(vec![]);
+        assert!(resolve_target_drive(&drives, &ChoosePrompter(Some(0))).is_err());
+    }
+
+    #[test]
+    fn resolve_target_drive_errors_when_nothing_selected() {
+        let drives = FakeDrives(vec![drive("/mnt/a")]);
+        assert!(resolve_target_drive(&drives, &ChoosePrompter(None)).is_err());
+    }
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
@@ -734,7 +832,7 @@ mod tests {
                 assert_eq!(source, PathBuf::from("/mnt/pool/home"));
                 assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
                 assert_eq!(basename, "home");
-                assert_eq!(target_dir, PathBuf::from("/mnt/drive/host"));
+                assert_eq!(target_dir, Some(PathBuf::from("/mnt/drive/host")));
                 // Defaults: incremental on, keep-all retention.
                 assert_eq!(incremental, IncrementalArg::Yes);
                 assert_eq!(retention.snapshot_preserve_min, "all");
