@@ -134,13 +134,20 @@ impl RetentionPolicy {
         if !schedule.is_empty() && schedule != "no" {
             for token in schedule.split_whitespace() {
                 let (unit, count) = parse_tier(token)?;
-                match unit {
-                    Unit::Hours => policy.hourly = Some(count),
-                    Unit::Days => policy.daily = Some(count),
-                    Unit::Weeks => policy.weekly = Some(count),
-                    Unit::Months => policy.monthly = Some(count),
-                    Unit::Years => policy.yearly = Some(count),
+                // A unit must appear at most once: a repeated tier (e.g. a typo
+                // `7d 4d`) would silently overwrite the first and drop the tier
+                // the user meant — reject it like btrbk does.
+                let tier = match unit {
+                    Unit::Hours => &mut policy.hourly,
+                    Unit::Days => &mut policy.daily,
+                    Unit::Weeks => &mut policy.weekly,
+                    Unit::Months => &mut policy.monthly,
+                    Unit::Years => &mut policy.yearly,
+                };
+                if tier.is_some() {
+                    return Err(RetentionParseError::Token(token.to_string()));
                 }
+                *tier = Some(count);
             }
         }
         Ok(policy)
@@ -643,5 +650,22 @@ mod tests {
         assert!(RetentionPolicy::parse("all", "d").is_err()); // no count
         assert!(RetentionPolicy::parse("all", "7d xyz").is_err()); // bad second token
         assert!(RetentionPolicy::parse("all", "7").is_err()); // no unit
+    }
+
+    #[test]
+    fn rejects_duplicate_tier_tokens() {
+        // A repeated unit (typo) must be rejected, not silently overwritten:
+        // a user meaning "7d 4w" who mistypes "7d 4d" would otherwise lose the
+        // weekly tier (and backups) with no error. btrbk rejects this too.
+        assert!(RetentionPolicy::parse("all", "7d 4d").is_err());
+        assert!(RetentionPolicy::parse("all", "7d 4w 4d").is_err());
+        assert!(RetentionPolicy::parse("all", "*d 4d").is_err());
+        // A valid, non-duplicate schedule still parses with the right tiers.
+        let p = RetentionPolicy::parse("all", "7d 4w").unwrap();
+        assert_eq!(p.daily, Some(TierCount::Count(7)));
+        assert_eq!(p.weekly, Some(TierCount::Count(4)));
+        assert_eq!(p.hourly, None);
+        assert_eq!(p.monthly, None);
+        assert_eq!(p.yearly, None);
     }
 }
