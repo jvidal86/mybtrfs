@@ -465,3 +465,33 @@ duplicate-UUID (btrbk warns, mybtrfs refuses) — covered only by `05`, not by t
 - **CI needs `/dev/kvm`** (nested virtualization) for the T2 VM. GitHub-hosted Ubuntu runners
   expose KVM; on a runner without it, QEMU falls back to TCG software emulation — correct but
   much slower. Verify KVM availability when wiring the pipeline.
+
+---
+
+## Implementation status (T1)
+
+`crates/cli/tests/diff_btrbk_schedule.rs` implements the **verifiable halves** of the
+T1 scheduler diff as always-on unit tests:
+
+- **Oracle parser** — `btrbk_schedule_survivors` reads btrbk's `--format raw`
+  schedule output (space-separated `key=value` rows; columns
+  `topic action url host port path hod dow min h d w m y` per btrbk source), and
+  returns the leaf names with `action=preserve`. Assumes space-free fields (true
+  for scheme leaf names).
+- **Subject side** — `mybtrfs_survivors` parses each name's timestamp and runs
+  `mybtrfs_domain::retention::schedule`, returning the preserved leaf names.
+
+The **live oracle diff** (`oracle_schedule_diff_against_btrbk`) is `#[ignore]`d.
+Why it cannot run in the current sandbox, and what it needs:
+
+- **No `faketime`** here, and btrbk has no injectable clock. The test sidesteps
+  this by placing snapshots at whole-day offsets from one shared `now`, so a sub-
+  second skew between btrbk's wall clock and the injected domain clock never flips
+  a day/week/month decision — no `faketime` required for coarse-tier scenarios.
+- **btrbk schedules from live btrfs** and its `MAIN:` block runs on load (it is not
+  cleanly `require`-able to call `sub schedule` in isolation, and it ships no test
+  harness). So a controlled snapshot set means **root + loopback btrfs** (as in the
+  `e2e` gate), plus a real btrbk via the `MYBTRFS_BTRBK` env var.
+
+Run it where those exist with:
+`sudo -E env "PATH=$PATH" MYBTRFS_BTRBK=/abs/btrbk cargo test --test diff_btrbk_schedule -- --ignored`.

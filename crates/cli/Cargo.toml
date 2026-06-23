@@ -16,5 +16,11 @@ anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
 
+[dev-dependencies]
+# The differential-conformance test (tests/diff_btrbk_schedule.rs) drives the
+# domain retention scheduler directly and builds reference instants.
+mybtrfs-domain.workspace = true
+chrono.workspace = true
+
 [lints]
 workspace = true
