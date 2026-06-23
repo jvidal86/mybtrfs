@@ -15,8 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
-use mybtrfs_domain::model::Subvolume;
-use mybtrfs_domain::parent::ParentSelection;
+use mybtrfs_domain::model::{RelationshipGraph, Subvolume};
+use mybtrfs_domain::parent::{Incremental, ParentSelection, best_parent};
 
 use crate::ports::{
     DeleteCommit, DeletePort, FilesystemPort, PortError, SnapshotPort, SubvolumeRepository,
@@ -202,20 +202,26 @@ impl<'a> RestoreService<'a> {
         }
 
         // Bring the backup onto the destination filesystem. For a remote backup
-        // this means a full send/receive into the destination's directory, then
-        // making *that* read-only copy writable (the intermediate is deleted only
-        // after the result verifies, so a failure leaves it recoverable).
+        // this means a send/receive into the destination's directory, then making
+        // *that* read-only copy writable (the intermediate is deleted only after
+        // the result verifies, so a failure leaves it recoverable). The transfer
+        // is incremental when the destination already holds a correlated ancestor
+        // (P4-06), otherwise a full send.
         let (restored, staging) = if transferred_back {
             let staging_dir = dest.parent().unwrap_or(dest);
+            let selection = self.choose_transfer_back_parent(&backup_subvol, staging_dir)?;
             log::info!(
-                "restore: backup is on another filesystem; transferring it back into {}",
-                staging_dir.display()
+                "restore: backup is on another filesystem; transferring it back into {} ({})",
+                staging_dir.display(),
+                if selection.parent.is_some() {
+                    "incremental"
+                } else {
+                    "full"
+                }
             );
-            let received = self.transfer.send_receive(
-                &backup_subvol,
-                &ParentSelection::default(),
-                staging_dir,
-            )?;
+            let received = self
+                .transfer
+                .send_receive(&backup_subvol, &selection, staging_dir)?;
             let received_path = received.mountpoint.join(&received.path);
             let restored = self.snapshots.make_writable(&received_path, dest)?;
             (restored, Some(received_path))
@@ -253,6 +259,35 @@ impl<'a> RestoreService<'a> {
             transferred_back,
             dry_run: false,
         })
+    }
+
+    /// Choose an incremental parent for a transfer-back (P4-06): when the
+    /// destination filesystem already holds a subvolume correlated with one of the
+    /// backup's ancestors, send `-p` against that ancestor for a delta transfer;
+    /// otherwise a full send. Restore never refuses — [`Incremental::Yes`] always
+    /// falls back to a full send, so a missing parent is not an error.
+    ///
+    /// The send-side candidates are the subvolumes on the backup's own filesystem
+    /// (`backup.mountpoint`); the receive-side correlation set is the subvolumes on
+    /// the destination filesystem (`dest_dir`). This reuses the same
+    /// [`best_parent`] resolution as an ordinary incremental backup.
+    ///
+    /// # Errors
+    /// [`PortError`] if either listing fails, or [`PortError::Verification`] if a
+    /// set carries a duplicate uuid (the cloned-disk guard).
+    fn choose_transfer_back_parent(
+        &self,
+        backup: &Subvolume,
+        dest_dir: &Path,
+    ) -> Result<ParentSelection, PortError> {
+        let send_side = self.repo.list(&backup.mountpoint)?;
+        let receive_side = self.repo.list(dest_dir)?;
+        let send_graph = RelationshipGraph::build(send_side)
+            .map_err(|err| PortError::Verification(err.to_string()))?;
+        let receive_graph = RelationshipGraph::build(receive_side)
+            .map_err(|err| PortError::Verification(err.to_string()))?;
+        best_parent(backup, &send_graph, &receive_graph, Incremental::Yes)
+            .map_err(|err| PortError::Verification(err.to_string()))
     }
 
     /// Pick a non-colliding move-aside path for `dest`: `<dest>.broken`, else
@@ -317,32 +352,48 @@ mod tests {
     const LOCAL_BACKUP: &str = "/mnt/pool/.snapshots/home.20240102T1531";
     const REMOTE_BACKUP: &str = "/mnt/drive/host/home.20240102T1531";
 
-    /// A `SubvolumeRepository` whose `show` returns one configured backup; its
-    /// `mountpoint` is what tells a local restore from a transfer-back.
+    /// A `SubvolumeRepository` whose `show` returns one configured backup (its
+    /// `mountpoint` tells a local restore from a transfer-back), and whose `list`
+    /// answers per filesystem: subvolumes on the drive vs the pool, so transfer-
+    /// back parent resolution (P4-06) can be exercised.
     struct FakeRepo {
         backup: Subvolume,
+        drive_subvols: Vec<Subvolume>,
+        pool_subvols: Vec<Subvolume>,
+    }
+    impl FakeRepo {
+        /// A repository over just the backup (empty filesystems — full-send path).
+        fn new(backup: Subvolume) -> Self {
+            Self {
+                backup,
+                drive_subvols: Vec::new(),
+                pool_subvols: Vec::new(),
+            }
+        }
     }
     impl SubvolumeRepository for FakeRepo {
         fn show(&self, _path: &Path) -> Result<Subvolume, PortError> {
             Ok(self.backup.clone())
         }
-        fn list(&self, _filesystem: &Path) -> Result<Vec<Subvolume>, PortError> {
-            unimplemented!("restore never lists a filesystem")
+        fn list(&self, filesystem: &Path) -> Result<Vec<Subvolume>, PortError> {
+            if filesystem.starts_with("/mnt/drive") {
+                Ok(self.drive_subvols.clone())
+            } else {
+                Ok(self.pool_subvols.clone())
+            }
         }
     }
 
     /// A repository whose backup is already on the destination filesystem.
     fn local_repo() -> FakeRepo {
-        FakeRepo {
-            backup: backup_on("/mnt/pool", ".snapshots/home.20240102T1531"),
-        }
+        FakeRepo::new(backup_on("/mnt/pool", ".snapshots/home.20240102T1531"))
     }
 
-    /// A `TransferPort` recording each `send_receive` (the source's absolute path
-    /// and the receive directory) and returning a configured received copy; it
-    /// asserts a transfer-back is always a full send (no parent).
+    /// A `TransferPort` recording each `send_receive` — the source's absolute path,
+    /// the receive directory, and the chosen parent's absolute path (`None` for a
+    /// full send) — and returning a configured received copy.
     struct RecordingTransfer {
-        calls: RefCell<Vec<(PathBuf, PathBuf)>>,
+        calls: RefCell<Vec<(PathBuf, PathBuf, Option<PathBuf>)>>,
         received: Subvolume,
     }
     impl RecordingTransfer {
@@ -356,7 +407,7 @@ mod tests {
         fn unused() -> Self {
             Self::returning(backup_on("/mnt/pool", "unused"))
         }
-        fn calls(&self) -> Vec<(PathBuf, PathBuf)> {
+        fn calls(&self) -> Vec<(PathBuf, PathBuf, Option<PathBuf>)> {
             self.calls.borrow().clone()
         }
     }
@@ -367,13 +418,14 @@ mod tests {
             selection: &ParentSelection,
             target_dir: &Path,
         ) -> Result<Subvolume, PortError> {
-            assert!(
-                selection.parent.is_none(),
-                "a transfer-back must be a full send"
-            );
+            let parent = selection
+                .parent
+                .as_ref()
+                .map(|p| p.mountpoint.join(&p.path));
             self.calls.borrow_mut().push((
                 source.mountpoint.join(&source.path),
                 target_dir.to_path_buf(),
+                parent,
             ));
             Ok(self.received.clone())
         }
@@ -816,9 +868,7 @@ mod tests {
     fn restore_from_remote_target_transfers_back_then_makes_writable() {
         crate::init_test_logger();
         // The backup lives only on `/mnt/drive`; `dest` is on `/mnt/pool`.
-        let repo = FakeRepo {
-            backup: backup_on("/mnt/drive", "host/home.20240102T1531"),
-        };
+        let repo = FakeRepo::new(backup_on("/mnt/drive", "host/home.20240102T1531"));
         let snapshots = RecordingMakeWritable::clean();
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
@@ -829,10 +879,15 @@ mod tests {
             .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, false)
             .expect("remote restore succeeds");
 
-        // 1) a full send/receive of the backup into the destination's directory,
+        // 1) a full send/receive of the backup into the destination's directory
+        //    (no correlated ancestor on the pool → parent is None),
         assert_eq!(
             transfer.calls(),
-            vec![(PathBuf::from(REMOTE_BACKUP), PathBuf::from("/mnt/pool"))]
+            vec![(
+                PathBuf::from(REMOTE_BACKUP),
+                PathBuf::from("/mnt/pool"),
+                None
+            )]
         );
         // 2) then the received copy is made writable at dest,
         assert_eq!(
@@ -856,9 +911,7 @@ mod tests {
     #[test]
     fn restore_from_remote_dry_run_plans_the_transfer_without_executing() {
         crate::init_test_logger();
-        let repo = FakeRepo {
-            backup: backup_on("/mnt/drive", "host/home.20240102T1531"),
-        };
+        let repo = FakeRepo::new(backup_on("/mnt/drive", "host/home.20240102T1531"));
         let snapshots = RecordingMakeWritable::clean();
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
@@ -889,9 +942,7 @@ mod tests {
         // make_writable misbehaves (yields a received_uuid). The transfer-back
         // staging copy must be kept — not deleted — so the data stays recoverable
         // after the failed verification (delete happens only after a clean result).
-        let repo = FakeRepo {
-            backup: backup_on("/mnt/drive", "host/home.20240102T1531"),
-        };
+        let repo = FakeRepo::new(backup_on("/mnt/drive", "host/home.20240102T1531"));
         let snapshots = RecordingMakeWritable::yielding_received();
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
@@ -908,5 +959,96 @@ mod tests {
             deleter.calls().is_empty(),
             "the staging copy must be kept for recovery on a failed restore"
         );
+    }
+
+    #[test]
+    fn remote_restore_uses_an_incremental_parent_when_the_pool_has_a_correlated_ancestor() {
+        crate::init_test_logger();
+        // P4-06: the backup `home.B` (on the drive) descends from `home.A`, and the
+        // pool still holds a copy of `home.A` correlated with the drive's `home.A`
+        // (its uuid == the drive copy's received_uuid). The transfer-back must then
+        // send `-p home.A` (a delta), not a full send.
+        const DRIVE_FS: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        const POOL_FS: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        const A_UUID: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const A_RECV: &str = "a0a0a0a0-a0a0-a0a0-a0a0-a0a0a0a0a0a0";
+        const B_UUID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const B_RECV: &str = "b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0";
+
+        let sv = |id,
+                  uuid: &str,
+                  parent: Option<&str>,
+                  recv: Option<&str>,
+                  generation,
+                  mnt: &str,
+                  path: &str,
+                  fs: &str| Subvolume {
+            id,
+            uuid: Uuid::parse(uuid),
+            parent_uuid: parent.and_then(Uuid::parse),
+            received_uuid: recv.and_then(Uuid::parse),
+            generation,
+            cgen: generation,
+            readonly: true,
+            path: PathBuf::from(path),
+            fs_uuid: Uuid::parse(fs).expect("valid uuid"),
+            mountpoint: PathBuf::from(mnt),
+        };
+
+        let backup_b = sv(
+            302,
+            B_UUID,
+            Some(A_UUID),
+            Some(B_RECV),
+            22,
+            "/mnt/drive",
+            "host/home.20240102T1531",
+            DRIVE_FS,
+        );
+        let drive_a = sv(
+            301,
+            A_UUID,
+            None,
+            Some(A_RECV),
+            21,
+            "/mnt/drive",
+            "host/home.20240101T1000",
+            DRIVE_FS,
+        );
+        let pool_a = sv(
+            201,
+            A_RECV,
+            None,
+            None,
+            10,
+            "/mnt/pool",
+            ".snapshots/home.20240101T1000",
+            POOL_FS,
+        );
+
+        let repo = FakeRepo {
+            backup: backup_b.clone(),
+            drive_subvols: vec![drive_a, backup_b],
+            pool_subvols: vec![pool_a],
+        };
+        let snapshots = RecordingMakeWritable::clean();
+        let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
+        let deleter = RecordingDeleter::new();
+        let fs = FakeFs::new(false);
+        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+
+        let report = service
+            .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, false)
+            .expect("remote restore succeeds");
+
+        let calls = transfer.calls();
+        assert_eq!(calls.len(), 1, "one transfer-back");
+        assert_eq!(
+            calls[0].2,
+            Some(PathBuf::from("/mnt/drive/host/home.20240101T1000")),
+            "should send -p the correlated ancestor (incremental, not full)"
+        );
+        assert!(report.transferred_back);
+        assert!(report.restored.is_some());
     }
 }

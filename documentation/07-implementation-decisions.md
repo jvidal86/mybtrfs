@@ -114,11 +114,15 @@ needed, *how* to transfer, and *what* to clean up.
    cleanly (no corruption), and a wrong "remote" does a correct, if needless,
    transfer. (A literal-UUID compare would be marginally more precise but adds a
    port for no safety gain.)
-2. **Full send, not incremental (for now).** The transfer-back is always a full
-   `send/receive` (`ParentSelection::default()`). Restores are infrequent, so the
-   delta optimization (E2E-P4-06: reuse a common parent already on the pool) isn't
-   worth the graph-building/parent-resolution complexity yet — deferred, tracked
-   by P4-06. Full send is always correct and applicable.
+2. **Incremental when the pool has a correlated ancestor (P4-06).** The
+   transfer-back reuses the ordinary [`best_parent`] resolution:
+   `choose_transfer_back_parent` lists the backup's own filesystem (send side) and
+   the destination filesystem (receive side), builds both relationship graphs, and
+   asks `best_parent(backup, send, receive, Incremental::Yes)`. When a correlated
+   ancestor already lives on the destination it sends `-p` (a delta); otherwise it
+   falls back to a full send. `Incremental::Yes` never refuses, so a missing parent
+   is not an error — a restore always succeeds. *(Originally shipped as full-send
+   only; the delta optimization landed later as P4-06.)*
 3. **Verify, then clean up.** The received intermediate copy on the destination
    filesystem is deleted only **after** the writable result passes its clean-write
    verification (#7). If verification fails, the staging copy is **kept** so the

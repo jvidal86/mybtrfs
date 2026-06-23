@@ -42,9 +42,8 @@ red→green TDD.
 **What remains:** the loopback-btrfs e2e suite and the differential-oracle harness
 (`crates/cli/tests/{e2e,diff_btrbk_schedule}.rs`) are written but **`#[ignore]`d** —
 they need root/loopback (and `faketime` + a real btrbk for the oracle), so they are
-validated on a real host/CI, not in the sandbox. Smaller deferred refinements are
-tracked in `documentation/07` (e.g. P4-06 incremental transfer-back). Phase 5+
-(config file, remote/ssh, raw/encrypted targets, scheduling) is out of scope.
+validated on a real host/CI, not in the sandbox. Phase 5+ (config file, remote/ssh,
+raw/encrypted targets, scheduling) is out of scope.
 
 ## Workspace layout — the dependency rule is compiler-enforced
 
