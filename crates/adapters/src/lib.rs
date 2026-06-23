@@ -12,6 +12,7 @@ pub(crate) mod local_fs;
 pub(crate) mod lock;
 pub(crate) mod mounts;
 pub(crate) mod prompter;
+pub(crate) mod ssh;
 
 /// The btrfs-CLI-backed adapter (subvolume / snapshot / transfer / delete ports);
 /// resolves each path's filesystem from the mount table, so one instance serves
@@ -39,6 +40,11 @@ pub use journal::{FileJournal, NullJournal};
 /// Concurrency guard: [`FileLock`] — an advisory `flock` serializing mutating
 /// runs (released on drop / process exit).
 pub use lock::FileLock;
+
+/// Remote SSH addressing (Phase 5 §2): [`Endpoint`] (local vs remote),
+/// [`SshEndpoint`], and [`parse_endpoint`] — pure `ssh … -- [sudo] btrfs …`
+/// command construction, executed by the existing command runner.
+pub use ssh::{Endpoint, SshEndpoint, parse_endpoint};
 
 /// Initialize `env_logger` once for unit tests (idempotent; safe to call from
 /// every `#[test]`). Logs go through the test harness and appear only for
