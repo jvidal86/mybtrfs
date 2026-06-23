@@ -75,6 +75,7 @@ pub enum RestoreError {
 /// snapshot, and verify the result is a clean writable copy.
 pub struct RestoreService<'a> {
     repo: &'a dyn SubvolumeRepository,
+    dest_repo: &'a dyn SubvolumeRepository,
     snapshots: &'a dyn SnapshotPort,
     transfer: &'a dyn TransferPort,
     deleter: &'a dyn DeletePort,
@@ -83,12 +84,16 @@ pub struct RestoreService<'a> {
 
 impl<'a> RestoreService<'a> {
     /// Construct a service over the repository, snapshot, transfer, delete, and
-    /// filesystem ports. The repository resolves the backup's filesystem (to tell
-    /// a local restore from a transfer-back); transfer + delete carry out and then
-    /// clean up a transfer-back.
+    /// filesystem ports. `repo` resolves and lists the **backup's** filesystem
+    /// (which may be remote); `dest_repo` lists the **destination's** filesystem
+    /// (always local) for incremental-parent correlation. For a same-filesystem or
+    /// local transfer-back both are the same adapter; for a restore *from* a remote
+    /// source they differ. transfer + delete carry out and then clean up a
+    /// transfer-back.
     #[must_use]
     pub fn new(
         repo: &'a dyn SubvolumeRepository,
+        dest_repo: &'a dyn SubvolumeRepository,
         snapshots: &'a dyn SnapshotPort,
         transfer: &'a dyn TransferPort,
         deleter: &'a dyn DeletePort,
@@ -96,6 +101,7 @@ impl<'a> RestoreService<'a> {
     ) -> Self {
         Self {
             repo,
+            dest_repo,
             snapshots,
             transfer,
             deleter,
@@ -281,7 +287,7 @@ impl<'a> RestoreService<'a> {
         dest_dir: &Path,
     ) -> Result<ParentSelection, PortError> {
         let send_side = self.repo.list(&backup.mountpoint)?;
-        let receive_side = self.repo.list(dest_dir)?;
+        let receive_side = self.dest_repo.list(dest_dir)?;
         let send_graph = RelationshipGraph::build(send_side)
             .map_err(|err| PortError::Verification(err.to_string()))?;
         let receive_graph = RelationshipGraph::build(receive_side)
@@ -589,7 +595,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(
@@ -629,7 +635,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let err = service
             .restore(
@@ -653,7 +659,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(
@@ -688,7 +694,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let err = service
             .restore(
@@ -712,7 +718,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(
@@ -744,7 +750,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(
@@ -776,7 +782,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let err = service
             .restore(
@@ -805,7 +811,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(
@@ -840,7 +846,7 @@ mod tests {
         let repo = local_repo();
         let transfer = RecordingTransfer::unused();
         let deleter = RecordingDeleter::new();
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let err = service
             .restore(
@@ -873,7 +879,7 @@ mod tests {
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
         let fs = FakeFs::new(false);
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, false)
@@ -916,7 +922,7 @@ mod tests {
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
         let fs = FakeFs::new(false);
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, true)
@@ -947,7 +953,7 @@ mod tests {
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
         let fs = FakeFs::new(false);
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let err = service
             .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, false)
@@ -1035,7 +1041,7 @@ mod tests {
         let transfer = RecordingTransfer::returning(received_on("/mnt/pool", "home.20240102T1531"));
         let deleter = RecordingDeleter::new();
         let fs = FakeFs::new(false);
-        let service = RestoreService::new(&repo, &snapshots, &transfer, &deleter, &fs);
+        let service = RestoreService::new(&repo, &repo, &snapshots, &transfer, &deleter, &fs);
 
         let report = service
             .restore(Path::new(REMOTE_BACKUP), Path::new(DEST), false, false)

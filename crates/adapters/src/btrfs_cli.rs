@@ -17,7 +17,7 @@ use mybtrfs_domain::parent::ParentSelection;
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::mounts::{self, MountTable, ProcMounts};
-use crate::ssh::{SshCommandRunner, SshEndpoint, SshMountTable};
+use crate::ssh::{SshCommandRunner, SshEndpoint, SshMountTable, SshSourceRunner};
 
 /// External program name (spawned as an argv array, never via a shell).
 const BTRFS: &str = "btrfs";
@@ -56,6 +56,22 @@ impl BtrfsCliAdapter {
                 endpoint.clone(),
             )),
             mounts: Box::new(SshMountTable::new(Box::new(SystemCommandRunner), endpoint)),
+        }
+    }
+
+    /// Create the **transfer** adapter for restoring *from* a remote source
+    /// (Phase 5 §2): the `btrfs send` of the remote backup runs over SSH while the
+    /// `btrfs receive` into local staging — and the verification of the received
+    /// copy — run locally (resolved from the local `/proc/self/mounts`). The mirror
+    /// of [`ssh_target`](Self::ssh_target).
+    #[must_use]
+    pub fn ssh_source(endpoint: SshEndpoint) -> Self {
+        Self {
+            runner: Box::new(SshSourceRunner::new(
+                Box::new(SystemCommandRunner),
+                endpoint,
+            )),
+            mounts: Box::new(ProcMounts),
         }
     }
 

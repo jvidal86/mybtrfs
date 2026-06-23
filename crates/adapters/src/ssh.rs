@@ -171,6 +171,44 @@ impl CommandRunner for SshCommandRunner {
     }
 }
 
+/// A [`CommandRunner`] for the **reverse** transfer direction — restoring *from* a
+/// remote source. Single commands (the verify `show` of the locally-received copy)
+/// run **locally**; for the `send | receive` pipe it wraps only the **producer**
+/// (`btrfs send` of the remote backup) in `ssh host -- sudo …`, leaving the
+/// consumer (`btrfs receive` into local staging) local. The mirror image of
+/// [`SshCommandRunner`], which wraps the consumer for backup *to* a remote target.
+pub(crate) struct SshSourceRunner {
+    inner: Box<dyn CommandRunner>,
+    endpoint: SshEndpoint,
+}
+
+impl SshSourceRunner {
+    /// Wrap `inner` (a local runner) so the *send* side runs on `endpoint`.
+    pub(crate) fn new(inner: Box<dyn CommandRunner>, endpoint: SshEndpoint) -> Self {
+        Self { inner, endpoint }
+    }
+}
+
+impl CommandRunner for SshSourceRunner {
+    fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+        // Local: verifies the locally-received copy / resolves its filesystem.
+        self.inner.run(program, args)
+    }
+
+    fn pipe(
+        &self,
+        producer: (&str, &[&OsStr]),
+        consumer: (&str, &[&OsStr]),
+    ) -> Result<(), PortError> {
+        // The producer (`btrfs send` of the remote backup) runs over ssh; the
+        // consumer (`btrfs receive` into local staging) stays local.
+        let (producer_program, producer_args) = producer;
+        let (ssh_program, ssh_args) = self.endpoint.command(true, producer_program, producer_args);
+        self.inner
+            .pipe((ssh_program, &arg_refs(&ssh_args)), consumer)
+    }
+}
+
 /// A [`MountTable`] that reads the **remote** host's `/proc/self/mounts` over SSH
 /// (no sudo — it is world-readable), so `BtrfsCliAdapter` resolves a remote-target
 /// path to its filesystem exactly as it does locally.
@@ -445,6 +483,86 @@ mod tests {
                     "receive",
                     "/mnt/btrfs-test",
                 ])
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_source_runner_wraps_the_send_in_ssh_and_keeps_the_receive_local() {
+        crate::init_test_logger();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runner = SshSourceRunner::new(
+            Box::new(RecordingRunner {
+                log: Rc::clone(&log),
+                stdout: String::new(),
+            }),
+            SshEndpoint {
+                user: Some("isard".to_owned()),
+                host: "apolo".to_owned(),
+                port: None,
+            },
+        );
+        runner
+            .pipe(
+                (
+                    "btrfs",
+                    &[OsStr::new("send"), OsStr::new("/mnt/btrfs-test/data.X")],
+                ),
+                (
+                    "btrfs",
+                    &[OsStr::new("receive"), OsStr::new("/pool/staging")],
+                ),
+            )
+            .unwrap();
+        // Producer (send) is ssh-wrapped; consumer (receive) stays a local btrfs.
+        assert_eq!(
+            log.borrow()[0],
+            (
+                "PIPE ssh|btrfs".to_owned(),
+                ss(&[
+                    "-o",
+                    "BatchMode=yes",
+                    "isard@apolo",
+                    "--",
+                    "sudo",
+                    "btrfs",
+                    "send",
+                    "/mnt/btrfs-test/data.X",
+                    "|",
+                    "receive",
+                    "/pool/staging",
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_source_runner_runs_single_commands_locally() {
+        crate::init_test_logger();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runner = SshSourceRunner::new(
+            Box::new(RecordingRunner {
+                log: Rc::clone(&log),
+                stdout: String::new(),
+            }),
+            apolo(),
+        );
+        // The verify `show` of the locally-received copy is NOT ssh-wrapped.
+        runner
+            .run(
+                "btrfs",
+                &[
+                    OsStr::new("subvolume"),
+                    OsStr::new("show"),
+                    OsStr::new("/pool/staging/data.X"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            log.borrow()[0],
+            (
+                "btrfs".to_owned(),
+                ss(&["subvolume", "show", "/pool/staging/data.X"])
             )
         );
     }

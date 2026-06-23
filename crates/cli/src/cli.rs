@@ -192,7 +192,8 @@ enum Command {
     },
     /// Restore a backup to a writable subvolume at `dest` (Phase 4).
     Restore {
-        /// The backup: a read-only subvolume on the destination filesystem.
+        /// The backup to restore: a read-only subvolume — a local path, or a
+        /// remote `ssh://[user@]host[:port]/path` source.
         backup: PathBuf,
         /// Where to create the writable restored subvolume.
         dest: PathBuf,
@@ -461,15 +462,33 @@ fn dispatch(cli: &Cli) -> Result<()> {
             force,
             dry_run,
         } => {
-            let backup = validate_path(backup)?;
             let dest = validate_new_path(dest)?;
-            // A backup on a different filesystem is transferred back via
-            // send/receive (the `btrfs` adapter serves repo/snapshot/transfer);
-            // the staging-copy cleanup deletes through the logging deleter so it
-            // is visible (decision ID-1).
-            let report = RestoreService::new(&btrfs, &btrfs, &btrfs, &logging_deleter, &localfs)
-                .restore(&backup, &dest, *force, *dry_run)
-                .context("restore failed")?;
+            // The backup may be local or a remote `ssh://…` source. A local backup
+            // on a different filesystem transfers back via send/receive; a remote
+            // backup additionally runs its `btrfs send` over ssh while the receive +
+            // make-writable + staging cleanup stay local. The staging-copy cleanup
+            // deletes through the logging deleter so it is visible (decision ID-1).
+            let report = match parse_target(backup)? {
+                Endpoint::Local(backup) => {
+                    let backup = validate_path(&backup)?;
+                    RestoreService::new(&btrfs, &btrfs, &btrfs, &btrfs, &logging_deleter, &localfs)
+                        .restore(&backup, &dest, *force, *dry_run)
+                }
+                Endpoint::Remote { ssh, path } => {
+                    let ssh_repo = BtrfsCliAdapter::ssh_target(ssh.clone()); // remote show/list
+                    let ssh_transfer = BtrfsCliAdapter::ssh_source(ssh); // remote send | local receive
+                    RestoreService::new(
+                        &ssh_repo,        // backup's filesystem (remote)
+                        &btrfs,           // destination filesystem (local)
+                        &btrfs,           // make_writable (local)
+                        &ssh_transfer,    // remote send | local receive
+                        &logging_deleter, // staging cleanup (local)
+                        &localfs,
+                    )
+                    .restore(&path, &dest, *force, *dry_run)
+                }
+            }
+            .context("restore failed")?;
             print_restore_report(&report);
             Ok(())
         }
