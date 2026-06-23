@@ -34,10 +34,30 @@ sudo install -m0644 cron/mybtrfs.crontab /etc/cron.d/mybtrfs
 sudoedit /etc/cron.d/mybtrfs            # set the paths
 ```
 
+## Remote (ssh) targets
+
+`mybtrfs run … ssh://[user@]host[:port]/path` backs up to a btrfs filesystem on
+another host (Phase 5 §2). `test/mybtrfs-ssh-smoke.sh` proves the path end-to-end
+against a real target without touching any real data — it builds a tiny throwaway
+loopback btrfs source, backs it up over ssh, verifies the received subvolume
+(readonly + Received UUID), and cleans up:
+
+```sh
+sudo contrib/test/mybtrfs-ssh-smoke.sh
+# override the target with env vars, e.g.:
+#   sudo REMOTE_HOST=10.2.152.181 REMOTE_PATH=/mnt/btrfs-test contrib/test/mybtrfs-ssh-smoke.sh
+```
+
+Prereqs on the remote: btrfs-progs, a mounted btrfs at the target path, your key in
+`authorized_keys`, and passwordless sudo for btrfs
+(`isard ALL=(root) NOPASSWD: /usr/bin/btrfs`). Remote *pruning* isn't supported yet,
+so a remote target keeps the default keep-all retention.
+
 ## Notes
 
 - **Target must be explicit.** The interactive drive picker is for terminals; a
-  scheduled run takes an already-mounted `--target`/`MYBTRFS_TARGET` path.
+  scheduled run takes an already-mounted `--target`/`MYBTRFS_TARGET` path (local or
+  `ssh://…`).
 - **Keep-all by default.** Without `--snapshot-preserve`/`--target-preserve`,
   nothing is pruned — add them once you trust the backups.
 - **One lock for the host.** `--lock /run/mybtrfs.lock` serializes every scheduled
