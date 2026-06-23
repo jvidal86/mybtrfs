@@ -50,8 +50,9 @@ sudo contrib/test/mybtrfs-ssh-smoke.sh
 
 Prereqs on the remote: btrfs-progs, a mounted btrfs at the target path, your key in
 `authorized_keys`, and passwordless sudo for btrfs
-(`isard ALL=(root) NOPASSWD: /usr/bin/btrfs`). Remote *pruning* isn't supported yet,
-so a remote target keeps the default keep-all retention.
+(`isard ALL=(root) NOPASSWD: /usr/bin/btrfs`). Retention works against a remote
+target too (`--target-preserve …` / `--target-preserve-min …`): target backups are
+pruned over ssh while source snapshots prune locally.
 
 ## Notes
 

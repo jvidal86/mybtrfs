@@ -2,9 +2,11 @@
 #
 # mybtrfs SSH remote-backup smoke test (Phase 5 §2).
 #
-# Makes a tiny THROWAWAY loopback btrfs source, backs it up to a remote btrfs
-# target over ssh, verifies the received subvolume is a real backup (readonly +
-# Received UUID), and cleans up the local source afterwards. Touches no real data.
+# Makes a tiny THROWAWAY loopback btrfs source and, against a remote btrfs target
+# over ssh: (phase 1) backs it up and verifies the received subvolume is a real
+# backup (readonly + Received UUID); (phase 2) backs it up again under
+# --target-preserve-min latest and verifies the older backup was pruned *over ssh*.
+# Cleans up the local source afterwards. Touches no real data.
 #
 #   sudo contrib/test/mybtrfs-ssh-smoke.sh
 #
@@ -72,12 +74,20 @@ EOF
 fi
 
 remote() { ssh -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" "$@"; }
+# Leaf names of THIS test's backups (`<basename>.<ts>`) currently on the target.
+remote_backups() {
+  remote "sudo btrfs subvolume list -o '$REMOTE_PATH'" \
+    | awk '{print $NF}' | sed 's#.*/##' | grep -E "^${BASENAME}\.[0-9]" || true
+}
 
 info "preflight: reach the target + remote sudo btrfs"
 remote "sudo -n btrfs --version" >/dev/null 2>&1 \
   || die "cannot run 'sudo btrfs' on ${REMOTE_USER}@${REMOTE_HOST} — VPN up? key authorized? NOPASSWD btrfs set?"
 remote "test -d '$REMOTE_PATH'" \
   || die "remote target dir not found: $REMOTE_PATH"
+
+info "clean slate: removing any leftover ${BASENAME}.* on the target"
+remote_backups | while read -r s; do remote "sudo btrfs subvolume delete '$REMOTE_PATH/$s'" >/dev/null; done
 
 # A tiny throwaway loopback btrfs source.
 WORK="$(mktemp -d /tmp/mybtrfs-smoke.XXXXXX)"
@@ -104,21 +114,39 @@ btrfs subvolume create "$MNT/$BASENAME" >/dev/null
 echo "hello mybtrfs over ssh @ $(date -Is)" > "$MNT/$BASENAME/hello.txt"
 mkdir "$MNT/.snap"
 
-info "mybtrfs run  $MNT/$BASENAME  ->  $ENDPOINT"
+# ---- phase 1: a backup lands on the remote, verified ----
+info "phase 1: mybtrfs run  $MNT/$BASENAME  ->  $ENDPOINT"
 "$MYBTRFS" run "$MNT/$BASENAME" "$MNT/.snap" "$BASENAME" "$ENDPOINT" --yes --lock "$LOCK"
 
-info "verifying the received subvolume on the target"
-name="$(remote "sudo btrfs subvolume list -o '$REMOTE_PATH'" \
-        | awk '{print $NF}' | sed 's#.*/##' | grep -E "^${BASENAME}\.[0-9]" | sort | tail -1)"
-[ -n "$name" ] || die "no ${BASENAME}.<timestamp> subvolume found under $REMOTE_PATH"
-show="$(remote "sudo btrfs subvolume show '$REMOTE_PATH/$name'")"
+name1="$(remote_backups | sort | tail -1)"
+[ -n "$name1" ] || die "no ${BASENAME}.<timestamp> subvolume found under $REMOTE_PATH"
+show="$(remote "sudo btrfs subvolume show '$REMOTE_PATH/$name1'")"
 printf '%s\n' "$show" | grep -qi "readonly" \
   || die "received subvolume is not readonly:
 $show"
 printf '%s\n' "$show" | grep -iE "Received UUID:[[:space:]]*[0-9a-f]{8}-" >/dev/null \
   || die "received subvolume has no Received UUID (not a real backup):
 $show"
+info "phase 1 OK — $REMOTE_PATH/$name1 is readonly with a Received UUID"
+
+# ---- phase 2: a second backup + retention prunes the older one over ssh ----
+info "phase 2: a second backup with --target-preserve-min latest (prunes the first, remotely)"
+sleep 2
+out2="$("$MYBTRFS" run "$MNT/$BASENAME" "$MNT/.snap" "$BASENAME" "$ENDPOINT" --yes --lock "$LOCK" \
+        --incremental no --snapshot-preserve-min latest --target-preserve-min latest 2>&1)"
+printf '%s\n' "$out2" | sed 's/^/   /'
+
+# The older backup ($name1) must be gone from the target, pruned over ssh.
+if remote_backups | grep -qxF "$name1"; then
+  die "remote prune did not delete the older backup $name1 (still present)"
+fi
+remaining="$(remote_backups | wc -l)"
+[ "$remaining" -ge 1 ] || die "the latest backup was unexpectedly removed too (none left)"
+printf '%s\n' "$out2" | grep -qiE "pruned [0-9]+ snapshot\(s\), [1-9]" \
+  || die "the run report does not show a pruned backup:
+$out2"
 
 echo
-printf '\033[32mPASS\033[0m — backed up to %s  (readonly + Received UUID).\n' "$REMOTE_PATH/$name"
-echo "Remote-target SSH backup works end-to-end."
+printf '\033[32mPASS\033[0m — backup + remote prune work end-to-end.\n'
+echo "  phase 1: $name1 received (readonly + Received UUID)"
+echo "  phase 2: $name1 pruned over ssh; $remaining backup(s) retained on $REMOTE_PATH"

@@ -78,9 +78,11 @@ A full `mybtrfs run … ssh://user@host/path` was **validated end-to-end on
 verified readonly with a Received UUID. Reproducible via
 `contrib/test/mybtrfs-ssh-smoke.sh`.
 
-**Still open:** remote *pruning* of the target (the single-deleter prune path needs
-a per-endpoint deleter), so a remote target currently requires the keep-all floor
-(`--target-preserve-min all`); and *restore from* a remote source (the reverse pipe).
+Remote **pruning** works too: a `RoutingDeletePort` (composition root) routes each
+deletion by path — target backups (under the remote dir) delete over ssh, source
+snapshots delete locally — so one `RetentionService` prunes both sides across the
+two transports and `--target-preserve …` applies to an `ssh://` target.
+**Still open:** *restore from* a remote source (the reverse pipe).
 
 ---
 

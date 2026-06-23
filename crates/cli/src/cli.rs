@@ -417,23 +417,20 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     )
                 }
                 Endpoint::Remote { ssh, path } => {
-                    // The target's queries / receive / delete run over ssh; remote
-                    // pruning isn't wired yet, so require the keep-all target floor.
-                    if retention_args.target_preserve_min != "all" {
-                        return Err(anyhow::Error::new(UsageError(
-                            "pruning a remote ssh:// target is not yet supported; keep the \
-                             default --target-preserve-min all"
-                                .to_owned(),
-                        )));
-                    }
                     let ssh_btrfs = BtrfsCliAdapter::ssh_target(ssh);
+                    // Prune across two transports: source snapshots delete locally,
+                    // target backups (under `path`) delete over ssh. Logged like the
+                    // local deleter (decision ID-1).
+                    let routing = RoutingDeletePort::new(&btrfs, &ssh_btrfs, path.clone());
+                    let logged = LoggingDeletePort::new(&routing);
+                    let remote_retention = RetentionService::new(&clock, &logged);
                     BackupService::with_incremental(
                         &clock,
                         &btrfs,     // source_repo (local)
                         &ssh_btrfs, // target_repo (remote)
                         &btrfs,     // snapshots (local)
                         &ssh_btrfs, // transfer (local send | remote receive)
-                        &retention,
+                        &remote_retention,
                         TimestampFormat::Long,
                         incremental,
                     )
@@ -953,6 +950,39 @@ impl DeletePort for LoggingDeletePort<'_> {
     }
 }
 
+/// A [`DeletePort`] that routes each deletion by path: anything under
+/// `remote_prefix` (a remote target directory) deletes through the `remote` port
+/// (ssh `btrfs subvolume delete`), everything else through `local`. This lets a
+/// single `RetentionService` prune **both** sides of a remote backup — local
+/// source snapshots and remote target backups — across two transports, so
+/// `--target-preserve` works against an `ssh://` target.
+struct RoutingDeletePort<'a> {
+    local: &'a dyn DeletePort,
+    remote: &'a dyn DeletePort,
+    remote_prefix: PathBuf,
+}
+
+impl<'a> RoutingDeletePort<'a> {
+    /// Route deletions under `remote_prefix` to `remote`, the rest to `local`.
+    fn new(local: &'a dyn DeletePort, remote: &'a dyn DeletePort, remote_prefix: PathBuf) -> Self {
+        Self {
+            local,
+            remote,
+            remote_prefix,
+        }
+    }
+}
+
+impl DeletePort for RoutingDeletePort<'_> {
+    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
+        if path.starts_with(&self.remote_prefix) {
+            self.remote.delete(path, commit)
+        } else {
+            self.local.delete(path, commit)
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1097,6 +1127,36 @@ mod tests {
         // A malformed ssh:// spec (no path) is a usage error → exit 2.
         let err = parse_target(Path::new("ssh://apolo")).unwrap_err();
         assert_eq!(exit_code_for(&err), exit_code::USAGE);
+    }
+
+    #[test]
+    fn routing_delete_port_sends_remote_paths_over_ssh_and_keeps_the_rest_local() {
+        use std::cell::RefCell;
+        struct Rec(RefCell<Vec<PathBuf>>);
+        impl DeletePort for Rec {
+            fn delete(&self, path: &Path, _commit: DeleteCommit) -> Result<(), PortError> {
+                self.0.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            }
+        }
+        let local = Rec(RefCell::new(Vec::new()));
+        let remote = Rec(RefCell::new(Vec::new()));
+        let routing = RoutingDeletePort::new(&local, &remote, PathBuf::from("/mnt/btrfs-test"));
+
+        // A source snapshot deletes locally; a target backup (under the remote
+        // prefix) deletes over ssh.
+        routing
+            .delete(Path::new("/pool/.snap/data.X"), DeleteCommit::Deferred)
+            .unwrap();
+        routing
+            .delete(Path::new("/mnt/btrfs-test/data.X"), DeleteCommit::Deferred)
+            .unwrap();
+
+        assert_eq!(*local.0.borrow(), vec![PathBuf::from("/pool/.snap/data.X")]);
+        assert_eq!(
+            *remote.0.borrow(),
+            vec![PathBuf::from("/mnt/btrfs-test/data.X")]
+        );
     }
 
     #[test]
