@@ -81,7 +81,10 @@ verified readonly with a Received UUID. Reproducible via
 Remote **pruning** works too: a `RoutingDeletePort` (composition root) routes each
 deletion by path — target backups (under the remote dir) delete over ssh, source
 snapshots delete locally — so one `RetentionService` prunes both sides across the
-two transports and `--target-preserve …` applies to an `ssh://` target.
+two transports and `--target-preserve …` applies to an `ssh://` target. **Validated
+end-to-end 2026-06-23** (smoke-test phase 2): a second backup under
+`--target-preserve-min latest` deleted the older backup over ssh and its source
+snapshot locally (`pruned 1 snapshot(s), 1 backup(s)`).
 **Still open:** *restore from* a remote source (the reverse pipe).
 
 ---
