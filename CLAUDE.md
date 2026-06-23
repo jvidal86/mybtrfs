@@ -22,15 +22,29 @@ they are always in context. Read them before writing code; the full rationale is
 
 ## Current state
 
-A **Cargo workspace** under active **Spec-Driven / Test-Driven** development. The
-pure `domain` modules are implemented with tests; everything outward (ports,
-application use cases, adapters, CLI) is a doc-commented **stub** awaiting its TDD
-increment.
+A **Cargo workspace** built Spec-Driven / Test-Driven. **All four delivery phases
+are implemented end to end** — the pure `domain` core, the `application` use cases
+and ports, the concrete `adapters`, and the `cli` composition root — each via
+red→green TDD.
 
-- Implemented (in `crates/domain`): `naming` (timestamp parse/format), `model`
-  (`Uuid`, `Subvolume`, `RelationshipGraph`), `retention` (the scheduler).
-- ~32 unit tests, all passing; `clippy`/`fmt` clean.
-- Still stubs: `domain/{parent,safety}`, all of `application`, `adapters`, `cli`.
+- `domain`: `naming`, `model`, `retention` (scheduler), `parent` (resolution),
+  `safety` (`SafetyPolicy`, applied before any delete).
+- `application`: `backup` (run/resume), `prune`, `restore` (incl. transfer-back),
+  `inventory` (list/stats), `retention`, and the `ports`.
+- `adapters`: `btrfs_cli` (subvolume/snapshot/transfer/delete + mount-table
+  resolution), `local_fs`, `drive_discovery`, `clock`, `prompter`, `journal`,
+  `lock`.
+- `cli`: the full command set + global flags (`--yes`/`--journal`/`--lock`),
+  exit-code taxonomy, and the run lock.
+- **~186 unit/integration tests**, all passing; `clippy` (pedantic subset) and
+  `fmt` clean; MSRV 1.89.
+
+**What remains:** the loopback-btrfs e2e suite and the differential-oracle harness
+(`crates/cli/tests/{e2e,diff_btrbk_schedule}.rs`) are written but **`#[ignore]`d** —
+they need root/loopback (and `faketime` + a real btrbk for the oracle), so they are
+validated on a real host/CI, not in the sandbox. Smaller deferred refinements are
+tracked in `documentation/07` (e.g. P4-06 incremental transfer-back). Phase 5+
+(config file, remote/ssh, raw/encrypted targets, scheduling) is out of scope.
 
 ## Workspace layout — the dependency rule is compiler-enforced
 
