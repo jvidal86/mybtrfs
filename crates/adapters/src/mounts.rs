@@ -116,6 +116,7 @@ tmpfs /run tmpfs rw 0 0
 
     #[test]
     fn parses_mount_entries() {
+        crate::init_test_logger();
         let entries = parse_mounts(MOUNTS).unwrap();
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[1].mountpoint, PathBuf::from("/mnt/pool"));
@@ -124,6 +125,7 @@ tmpfs /run tmpfs rw 0 0
 
     #[test]
     fn finds_longest_containing_btrfs_mount() {
+        crate::init_test_logger();
         let entries = parse_mounts(MOUNTS).unwrap();
         let nested = containing_btrfs_mount(&entries, Path::new("/mnt/pool/nested/sub")).unwrap();
         assert_eq!(nested.mountpoint, PathBuf::from("/mnt/pool/nested"));
@@ -133,6 +135,7 @@ tmpfs /run tmpfs rw 0 0
 
     #[test]
     fn ignores_non_btrfs_filesystems() {
+        crate::init_test_logger();
         let entries = parse_mounts(MOUNTS).unwrap();
         // `/` is ext4, so a path only under `/` has no containing btrfs mount.
         assert!(containing_btrfs_mount(&entries, Path::new("/etc/fstab")).is_none());
@@ -140,12 +143,14 @@ tmpfs /run tmpfs rw 0 0
 
     #[test]
     fn unescapes_octal_whitespace_in_mountpoints() {
+        crate::init_test_logger();
         let entries = parse_mounts("/dev/sdb1 /mnt/my\\040pool btrfs rw 0 0\n").unwrap();
         assert_eq!(entries[0].mountpoint, PathBuf::from("/mnt/my pool"));
     }
 
     #[test]
     fn rejects_a_malformed_line() {
+        crate::init_test_logger();
         let err = parse_mounts("only-one-field\n").unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
     }

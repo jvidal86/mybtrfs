@@ -70,6 +70,7 @@ mod tests {
 
     #[test]
     fn exists_reports_presence_and_absence() {
+        crate::init_test_logger();
         let tmp = TempDir::new("exists");
         let fs = LocalFsAdapter::new();
         let present = tmp.path("here");
@@ -80,6 +81,7 @@ mod tests {
 
     #[test]
     fn create_dir_all_makes_nested_dirs() {
+        crate::init_test_logger();
         let tmp = TempDir::new("mkdir");
         let fs = LocalFsAdapter::new();
         let nested = tmp.path("a/b/c");
@@ -89,6 +91,7 @@ mod tests {
 
     #[test]
     fn rename_moves_a_path_aside() {
+        crate::init_test_logger();
         let tmp = TempDir::new("rename");
         let fs = LocalFsAdapter::new();
         let from = tmp.path("orig");

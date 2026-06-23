@@ -159,6 +159,7 @@ mod tests {
 
     #[test]
     fn detects_mounted_btrfs_filesystems_with_hints() {
+        crate::init_test_logger();
         let found = discovery(LSBLK_JSON).detect().unwrap();
         assert_eq!(found.len(), 2);
 
@@ -186,6 +187,7 @@ mod tests {
 
     #[test]
     fn deduplicates_multiple_mounts_of_one_filesystem() {
+        crate::init_test_logger();
         let json = r#"{ "blockdevices": [
             { "path": "/dev/sdb1", "fstype": "btrfs", "mountpoint": "/mnt/a", "label": null, "uuid": "22222222-2222-4222-8222-222222222222", "rm": false },
             { "path": "/dev/sdb1", "fstype": "btrfs", "mountpoint": "/mnt/b", "label": null, "uuid": "22222222-2222-4222-8222-222222222222", "rm": false }
@@ -196,6 +198,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_json() {
+        crate::init_test_logger();
         let err = discovery("not json").detect().unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
     }

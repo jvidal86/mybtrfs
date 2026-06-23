@@ -179,6 +179,7 @@ mod tests {
 
     #[test]
     fn keep_all_default_deletes_nothing() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let service = RetentionService::new(&clock, &deleter);
@@ -201,6 +202,7 @@ mod tests {
 
     #[test]
     fn no_floor_deletes_all_via_port_with_absolute_paths() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let service = RetentionService::new(&clock, &deleter);
@@ -241,6 +243,7 @@ mod tests {
 
     #[test]
     fn force_preserve_anchor_rescues_from_deletion() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let service = RetentionService::new(&clock, &deleter);
@@ -272,6 +275,7 @@ mod tests {
 
     #[test]
     fn foreign_named_subvolume_is_never_scheduled_or_deleted() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let service = RetentionService::new(&clock, &deleter);
@@ -306,6 +310,7 @@ mod tests {
 
     #[test]
     fn dated_entry_resolves_long_name_against_reference_timezone() {
+        crate::init_test_logger();
         let plus2 = FixedOffset::east_opt(2 * 3600).expect("valid offset");
         let sv = snap(1, "home.20240102T1200"); // long format, no embedded offset
         let entry = super::dated_entry(&sv, plus2).expect("name parses");
@@ -333,6 +338,7 @@ mod tests {
 
     #[test]
     fn dated_entry_uses_embedded_offset_for_long_iso_names() {
+        crate::init_test_logger();
         let reference = FixedOffset::east_opt(0).expect("valid offset"); // UTC reference
         let sv = snap(2, "home.20240102T120000+0200"); // long-iso, +02:00
         let entry = super::dated_entry(&sv, reference).expect("name parses");

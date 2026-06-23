@@ -645,6 +645,7 @@ mod tests {
 
     #[test]
     fn snapshot_creates_readonly_snapshot_named_with_timestamp() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         let source_repo = FakeRepo::default();
         let target_repo = FakeRepo::default();
@@ -686,6 +687,7 @@ mod tests {
 
     #[test]
     fn snapshot_appends_collision_counter_when_name_already_exists() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         let source_repo = FakeRepo {
             subvols: vec![existing_snapshot(".mybtrfs_snapshots/home.20240102T1531")],
@@ -724,6 +726,7 @@ mod tests {
 
     #[test]
     fn run_snapshots_full_send_receives_then_keeps_all_by_default() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         let source_repo = FakeRepo::default();
         let target_repo = FakeRepo::default();
@@ -781,6 +784,7 @@ mod tests {
 
     #[test]
     fn run_prunes_orphans_but_force_preserves_the_just_created_pair() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         // An old snapshot (source fs) and an old backup (target fs), each
         // uncorrelated (orphans) — read from their respective repositories.
@@ -857,6 +861,7 @@ mod tests {
 
     #[test]
     fn resume_sends_latest_unbacked_snapshot() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let source_repo = FakeRepo {
             subvols: vec![
@@ -931,6 +936,7 @@ mod tests {
 
     #[test]
     fn resume_is_noop_when_latest_snapshot_already_backed_up() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let source_repo = FakeRepo {
             subvols: vec![ro_cgen(
@@ -983,6 +989,7 @@ mod tests {
 
     #[test]
     fn resume_only_considers_the_requested_basename() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let source_repo = FakeRepo {
             subvols: vec![
@@ -1037,6 +1044,7 @@ mod tests {
 
     #[test]
     fn run_uses_correlated_prior_snapshot_as_incremental_parent() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         // A prior snapshot (1) with its backup (11) on the target → 1 is a valid parent.
         let source_repo = FakeRepo {
@@ -1092,6 +1100,7 @@ mod tests {
 
     #[test]
     fn with_incremental_no_forces_a_full_send_even_when_a_parent_exists() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
         let source_repo = FakeRepo {
             subvols: vec![ro(
@@ -1145,6 +1154,7 @@ mod tests {
 
     #[test]
     fn prune_deletes_by_policy_without_creating_or_transferring() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-06-01T00:00:00+00:00");
         // One orphan snapshot and one orphan backup (uncorrelated), valid names.
         let source_repo = FakeRepo {
@@ -1212,6 +1222,7 @@ mod tests {
 
     #[test]
     fn prune_force_preserves_the_latest_common_pair() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-06-01T00:00:00+00:00");
         // A correlated pair (S1 <-> B11) plus an uncorrelated orphan on each side.
         let source_repo = FakeRepo {

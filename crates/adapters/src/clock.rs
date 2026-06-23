@@ -50,6 +50,7 @@ mod tests {
 
     #[test]
     fn fixed_clock_returns_its_configured_instant() {
+        crate::init_test_logger();
         let offset = FixedOffset::east_opt(2 * 3600).unwrap();
         let instant = offset.with_ymd_and_hms(2026, 6, 22, 19, 30, 0).unwrap();
         let clock = FixedClock::new(instant);
@@ -59,6 +60,7 @@ mod tests {
 
     #[test]
     fn system_clock_returns_a_plausible_current_time() {
+        crate::init_test_logger();
         // The real clock is the untested boundary; this only smoke-checks that it
         // returns a current (not epoch/zero) instant.
         assert!(SystemClock.now().year() >= 2020);

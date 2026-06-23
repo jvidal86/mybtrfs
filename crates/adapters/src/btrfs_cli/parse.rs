@@ -349,6 +349,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_parses_writable_subvolume() {
+        crate::init_test_logger();
         let sv = parse_show(SHOW_WRITABLE, PathBuf::from("@data"), &fs(), &mountpoint()).unwrap();
         assert_eq!(sv.id, 256);
         assert_eq!(sv.uuid, Uuid::parse("a1a1a1a1-1111-4111-8111-111111111111"));
@@ -364,6 +365,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_parses_readonly_received_snapshot() {
+        crate::init_test_logger();
         let sv = parse_show(
             SHOW_READONLY_RECEIVED,
             PathBuf::from("backups/@data.20260622T1900"),
@@ -386,6 +388,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_missing_required_field_is_error() {
+        crate::init_test_logger();
         let broken = SHOW_WRITABLE.replace(SHOW_KEY_ID, "Bogus Field");
         let err = parse_show(&broken, PathBuf::from("@data"), &fs(), &mountpoint()).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
@@ -393,6 +396,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_non_numeric_field_is_error() {
+        crate::init_test_logger();
         let err = parse_show(
             SHOW_BAD_GENERATION,
             PathBuf::from("@data"),
@@ -405,6 +409,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_rejects_malformed_uuid() {
+        crate::init_test_logger();
         let broken =
             SHOW_READONLY_RECEIVED.replace("a1a1a1a1-1111-4111-8111-111111111111", "not-a-uuid");
         let err = parse_show(
@@ -419,6 +424,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn show_rejects_implausible_id() {
+        crate::init_test_logger();
         let broken = SHOW_WRITABLE.replace("256", "3"); // id 3 < MIN_SUBVOLUME_ID
         let err = parse_show(&broken, PathBuf::from("@data"), &fs(), &mountpoint()).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
@@ -426,6 +432,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn list_parses_and_merges_readonly_flag() {
+        crate::init_test_logger();
         let subs = parse_list(LIST, READONLY_LIST, &fs(), &mountpoint()).unwrap();
         assert_eq!(subs.len(), 2);
 
@@ -460,18 +467,21 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn list_empty_output_is_empty() {
+        crate::init_test_logger();
         let subs = parse_list("", "", &fs(), &mountpoint()).unwrap();
         assert!(subs.is_empty());
     }
 
     #[test]
     fn list_malformed_line_is_error() {
+        crate::init_test_logger();
         let err = parse_list("ID 256 gen 120 garbage\n", "", &fs(), &mountpoint()).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
     }
 
     #[test]
     fn list_rejects_malformed_readonly_line() {
+        crate::init_test_logger();
         let err =
             parse_list(LIST, "not a valid readonly line\n", &fs(), &mountpoint()).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
@@ -479,6 +489,7 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
 
     #[test]
     fn list_rejects_malformed_uuid() {
+        crate::init_test_logger();
         let line = "ID 256 gen 120 cgen 95 top level 5 parent_uuid - received_uuid - uuid GARBAGE path @data\n";
         let err = parse_list(line, "", &fs(), &mountpoint()).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));

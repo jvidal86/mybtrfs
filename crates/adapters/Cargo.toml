@@ -17,5 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 # Other external deps (anyhow/thiserror) are added as each adapter is implemented.
 
+[dev-dependencies]
+env_logger.workspace = true
+
 [lints]
 workspace = true

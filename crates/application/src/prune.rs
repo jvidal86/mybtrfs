@@ -235,6 +235,7 @@ mod tests {
 
     #[test]
     fn keep_all_default_prunes_nothing() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let retention = RetentionService::new(&clock, &deleter);
@@ -257,6 +258,7 @@ mod tests {
 
     #[test]
     fn aggressive_policy_prunes_but_preserves_the_latest_common_pair() {
+        crate::init_test_logger();
         let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
         let deleter = RecordingDeleter::default();
         let retention = RetentionService::new(&clock, &deleter);

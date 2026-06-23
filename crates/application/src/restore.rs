@@ -224,6 +224,7 @@ mod tests {
 
     #[test]
     fn restore_to_fresh_dest_makes_a_writable_copy() {
+        crate::init_test_logger();
         let fs = FakeFs::new(false); // dest does not exist
         let snapshots = RecordingMakeWritable::clean();
         let service = RestoreService::new(&snapshots, &fs);
@@ -251,6 +252,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_existing_dest_without_force() {
+        crate::init_test_logger();
         let fs = FakeFs::new(true); // dest exists
         let snapshots = RecordingMakeWritable::clean();
         let service = RestoreService::new(&snapshots, &fs);
@@ -270,6 +272,7 @@ mod tests {
 
     #[test]
     fn restore_force_moves_existing_dest_aside_then_restores() {
+        crate::init_test_logger();
         let fs = FakeFs::new(true); // dest exists
         let snapshots = RecordingMakeWritable::clean();
         let service = RestoreService::new(&snapshots, &fs);
@@ -299,6 +302,7 @@ mod tests {
 
     #[test]
     fn restore_rejects_a_result_that_carries_a_received_uuid() {
+        crate::init_test_logger();
         // Guards invariant #7: a restored subvolume must never be a received one.
         let fs = FakeFs::new(false);
         let snapshots = RecordingMakeWritable::yielding_received();

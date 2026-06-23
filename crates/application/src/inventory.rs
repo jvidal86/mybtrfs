@@ -263,6 +263,7 @@ mod tests {
 
     #[test]
     fn stats_counts_snapshots_backups_correlated_orphaned_incomplete() {
+        crate::init_test_logger();
         let (source, target) = fixtures();
         let service = InventoryService::new(&source, &target);
 
@@ -287,6 +288,7 @@ mod tests {
 
     #[test]
     fn list_pairs_each_snapshot_with_its_backups_and_partitions_the_rest() {
+        crate::init_test_logger();
         let (source, target) = fixtures();
         let service = InventoryService::new(&source, &target);
 
@@ -323,6 +325,7 @@ mod tests {
 
     #[test]
     fn foreign_named_subvolumes_are_ignored() {
+        crate::init_test_logger();
         let source = FakeRepo {
             subvols: vec![
                 sub(

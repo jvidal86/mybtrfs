@@ -489,6 +489,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn show_resolves_filesystem_and_tags_the_subvolume() {
+        crate::init_test_logger();
         let sv = repo(FakeBtrfs::default())
             .show(Path::new("/mnt/pool/@data"))
             .unwrap();
@@ -502,6 +503,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn list_merges_readonly_from_second_call() {
+        crate::init_test_logger();
         let subs = repo(FakeBtrfs::default())
             .list(Path::new("/mnt/pool"))
             .unwrap();
@@ -515,6 +517,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn command_failure_propagates() {
+        crate::init_test_logger();
         let err = repo(FakeBtrfs {
             fail: true,
             ..FakeBtrfs::default()
@@ -526,6 +529,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn create_readonly_returns_the_readonly_snapshot() {
+        crate::init_test_logger();
         let sv = repo(FakeBtrfs {
             show: SHOW_READONLY.to_owned(),
             ..FakeBtrfs::default()
@@ -541,6 +545,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn create_readonly_rejects_a_writable_result() {
+        crate::init_test_logger();
         // SHOW (the default) is writable, so the post-snapshot check must fail.
         let err = repo(FakeBtrfs::default())
             .create_readonly(
@@ -553,6 +558,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn make_writable_returns_a_writable_snapshot() {
+        crate::init_test_logger();
         let sv = repo(FakeBtrfs::default()) // SHOW is writable
             .make_writable(
                 Path::new("/mnt/pool/backups/@data.20260622T1900"),
@@ -564,6 +570,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_full_backup_verifies_and_returns() {
+        crate::init_test_logger();
         let received = repo(FakeBtrfs {
             show: RECEIVED_FULL.to_owned(),
             ..FakeBtrfs::default()
@@ -581,6 +588,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_incremental_accepts_set_parent_uuid() {
+        crate::init_test_logger();
         let selection = ParentSelection {
             parent: Some(source_subvol("snapshots/@data.20260621T1900")),
             clone_sources: Vec::new(),
@@ -600,6 +608,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_full_rejects_a_set_parent_uuid() {
+        crate::init_test_logger();
         // RECEIVED_INCREMENTAL has parent_uuid set, but this is a full send.
         let err = repo(FakeBtrfs {
             show: RECEIVED_INCREMENTAL.to_owned(),
@@ -616,6 +625,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_deletes_a_garbled_result() {
+        crate::init_test_logger();
         let (adapter, calls) = recording_repo(FakeBtrfs {
             show: RECEIVED_GARBLED.to_owned(),
             ..FakeBtrfs::default()
@@ -639,6 +649,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_passes_parent_flag_for_incremental() {
+        crate::init_test_logger();
         let (adapter, calls) = recording_repo(FakeBtrfs {
             show: RECEIVED_INCREMENTAL.to_owned(),
             ..FakeBtrfs::default()
@@ -666,6 +677,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn send_receive_propagates_pipe_failure() {
+        crate::init_test_logger();
         let err = repo(FakeBtrfs {
             fail: true,
             ..FakeBtrfs::default()
@@ -681,6 +693,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn delete_passes_commit_each_only_when_requested() {
+        crate::init_test_logger();
         let (adapter, calls) = recording_repo(FakeBtrfs::default());
         adapter
             .delete(Path::new("/mnt/pool/snap"), DeleteCommit::Deferred)
@@ -697,6 +710,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
 
     #[test]
     fn delete_failure_propagates() {
+        crate::init_test_logger();
         let err = repo(FakeBtrfs {
             fail: true,
             ..FakeBtrfs::default()
