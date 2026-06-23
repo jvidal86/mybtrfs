@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
@@ -19,6 +19,7 @@ use mybtrfs_application::ports::{
 use mybtrfs_application::restore::RestoreService;
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
+use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
 
 /// Process exit codes (central table — RULES rule 14).
@@ -58,6 +59,11 @@ enum Command {
         basename: String,
         /// Target directory on the backup filesystem.
         target_dir: PathBuf,
+        /// `btrfs send -p` strategy.
+        #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
+        incremental: IncrementalArg,
+        #[command(flatten)]
+        retention: RetentionArgs,
     },
     /// Re-send the latest not-yet-backed-up snapshot without creating a new one.
     Resume {
@@ -67,6 +73,11 @@ enum Command {
         basename: String,
         /// Target directory on the backup filesystem.
         target_dir: PathBuf,
+        /// `btrfs send -p` strategy.
+        #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
+        incremental: IncrementalArg,
+        #[command(flatten)]
+        retention: RetentionArgs,
     },
     /// Prune snapshots/backups per retention policy (Phase 3).
     Prune,
@@ -98,6 +109,65 @@ enum Command {
     ListDrives,
 }
 
+/// `btrfs send -p` strategy, mirroring [`Incremental`]; defaults to `yes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum IncrementalArg {
+    /// Use a parent when one exists, else fall back to a full send.
+    Yes,
+    /// Require a related parent; never fall back to a full send.
+    Strict,
+    /// Always send full (no `-p`).
+    No,
+}
+
+impl From<IncrementalArg> for Incremental {
+    fn from(arg: IncrementalArg) -> Self {
+        match arg {
+            IncrementalArg::Yes => Self::Yes,
+            IncrementalArg::Strict => Self::Strict,
+            IncrementalArg::No => Self::No,
+        }
+    }
+}
+
+/// btrbk-style retention flags for a backup `run`/`resume`. The defaults
+/// (`preserve_min all`, no tiers) keep everything — retention only prunes once
+/// the caller opts into a schedule. See `documentation/01` and `domain::retention`.
+#[derive(Args, Debug)]
+struct RetentionArgs {
+    /// Snapshot-side minimum-keep floor (`all` / `latest` / `no` / `<count><h|d|w|m|y>`).
+    #[arg(long, default_value = "all")]
+    snapshot_preserve_min: String,
+    /// Snapshot-side tier schedule (e.g. `"24h 7d 4w 6m 5y"`; empty/`no` = no tiers).
+    #[arg(long, default_value = "")]
+    snapshot_preserve: String,
+    /// Target-side minimum-keep floor (`all` / `latest` / `no` / `<count><h|d|w|m|y>`).
+    #[arg(long, default_value = "all")]
+    target_preserve_min: String,
+    /// Target-side tier schedule (e.g. `"24h 7d 4w 6m 5y"`; empty/`no` = no tiers).
+    #[arg(long, default_value = "")]
+    target_preserve: String,
+}
+
+impl RetentionArgs {
+    /// Parse the snapshot-side policy from its btrbk-style strings.
+    fn snapshot_policy(&self) -> Result<RetentionPolicy> {
+        parse_policy(&self.snapshot_preserve_min, &self.snapshot_preserve)
+    }
+
+    /// Parse the target-side policy from its btrbk-style strings.
+    fn target_policy(&self) -> Result<RetentionPolicy> {
+        parse_policy(&self.target_preserve_min, &self.target_preserve)
+    }
+}
+
+/// Parse a single retention policy, mapping a malformed spec to a user-facing error.
+fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
+    RetentionPolicy::parse(preserve_min, preserve).with_context(|| {
+        format!("invalid retention policy (preserve_min={preserve_min:?}, preserve={preserve:?})")
+    })
+}
+
 /// Parse the command line and run; the returned exit code reflects success.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -121,15 +191,19 @@ fn dispatch(command: &Command) -> Result<()> {
     let retention = RetentionService::new(&clock, &deleter);
     // One resolve-per-path adapter serves as both source and target repository
     // (it resolves each path's filesystem), plus the snapshot and transfer ports.
-    let backup = BackupService::new(
-        &clock,
-        &btrfs, // source_repo
-        &btrfs, // target_repo
-        &btrfs, // snapshots
-        &btrfs, // transfer
-        &retention,
-        TimestampFormat::Long,
-    );
+    // The incremental mode is per-command, so build the service where it's used.
+    let backup_with = |incremental: Incremental| {
+        BackupService::with_incremental(
+            &clock,
+            &btrfs, // source_repo
+            &btrfs, // target_repo
+            &btrfs, // snapshots
+            &btrfs, // transfer
+            &retention,
+            TimestampFormat::Long,
+            incremental,
+        )
+    };
 
     match command {
         Command::Snapshot {
@@ -139,7 +213,8 @@ fn dispatch(command: &Command) -> Result<()> {
         } => {
             let source = validate_path(source)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
-            let snapshot = backup
+            // Snapshotting doesn't send, so the incremental mode is irrelevant.
+            let snapshot = backup_with(Incremental::Yes)
                 .snapshot(&source, &snapshot_dir, basename)
                 .context("failed to create snapshot")?;
             println!(
@@ -153,19 +228,22 @@ fn dispatch(command: &Command) -> Result<()> {
             snapshot_dir,
             basename,
             target_dir,
+            incremental,
+            retention: retention_args,
         } => {
             let source = validate_path(source)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
-            // Keep-all retention by default (Phase 1); policy flags arrive in Phase 3.
-            let report = backup
+            let snapshot_policy = retention_args.snapshot_policy()?;
+            let target_policy = retention_args.target_policy()?;
+            let report = backup_with((*incremental).into())
                 .run(
                     &source,
                     &snapshot_dir,
                     basename,
                     &target_dir,
-                    &RetentionPolicy::default(),
-                    &RetentionPolicy::default(),
+                    &snapshot_policy,
+                    &target_policy,
                 )
                 .context("backup run failed")?;
             print_run_report(&report);
@@ -229,17 +307,20 @@ fn dispatch(command: &Command) -> Result<()> {
             snapshot_dir,
             basename,
             target_dir,
+            incremental,
+            retention: retention_args,
         } => {
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
-            // Keep-all retention by default (policy flags arrive in Phase 3).
-            let report = backup
+            let snapshot_policy = retention_args.snapshot_policy()?;
+            let target_policy = retention_args.target_policy()?;
+            let report = backup_with((*incremental).into())
                 .resume(
                     &snapshot_dir,
                     basename,
                     &target_dir,
-                    &RetentionPolicy::default(),
-                    &RetentionPolicy::default(),
+                    &snapshot_policy,
+                    &target_policy,
                 )
                 .context("resume failed")?;
             print_resume_report(&report);
@@ -421,14 +502,74 @@ mod tests {
                 snapshot_dir,
                 basename,
                 target_dir,
+                incremental,
+                retention,
             } => {
                 assert_eq!(source, PathBuf::from("/mnt/pool/home"));
                 assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
                 assert_eq!(basename, "home");
                 assert_eq!(target_dir, PathBuf::from("/mnt/drive/host"));
+                // Defaults: incremental on, keep-all retention.
+                assert_eq!(incremental, IncrementalArg::Yes);
+                assert_eq!(retention.snapshot_preserve_min, "all");
+                assert_eq!(retention.snapshot_preserve, "");
             }
             _ => panic!("expected a Run command"),
         }
+    }
+
+    #[test]
+    fn run_accepts_incremental_and_retention_flags() {
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "run",
+            "/mnt/pool/home",
+            "/mnt/pool/.snapshots",
+            "home",
+            "/mnt/drive/host",
+            "--incremental",
+            "strict",
+            "--snapshot-preserve",
+            "24h 7d 4w",
+            "--target-preserve-min",
+            "latest",
+        ])
+        .unwrap();
+        let Command::Run {
+            incremental,
+            retention,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a Run command");
+        };
+        assert_eq!(incremental, IncrementalArg::Strict);
+        assert_eq!(Incremental::from(incremental), Incremental::Strict);
+        assert_eq!(retention.snapshot_preserve, "24h 7d 4w");
+        assert_eq!(retention.target_preserve_min, "latest");
+        // The retention strings parse into real policies.
+        assert!(retention.snapshot_policy().is_ok());
+        assert!(retention.target_policy().is_ok());
+    }
+
+    #[test]
+    fn rejects_a_malformed_retention_spec() {
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "run",
+            "/s",
+            "/d",
+            "home",
+            "/t",
+            "--snapshot-preserve",
+            "7x",
+        ])
+        .unwrap();
+        let Command::Run { retention, .. } = cli.command else {
+            panic!("expected a Run command");
+        };
+        // `7x` is not a valid tier unit → parsing the policy is an error.
+        assert!(retention.snapshot_policy().is_err());
     }
 
     #[test]
@@ -452,10 +593,13 @@ mod tests {
                 snapshot_dir,
                 basename,
                 target_dir,
+                incremental,
+                ..
             } => {
                 assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
                 assert_eq!(basename, "home");
                 assert_eq!(target_dir, PathBuf::from("/mnt/drive/host"));
+                assert_eq!(incremental, IncrementalArg::Yes);
             }
             _ => panic!("expected a Resume command"),
         }
