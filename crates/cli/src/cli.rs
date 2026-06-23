@@ -58,7 +58,10 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// The lock is held by a concurrent run (mapped to [`exit_code::LOCK_BUSY`]).
+/// The run lock could not be acquired — held by a concurrent run, or the lock
+/// file itself was unopenable (e.g. owned by another user in a sticky dir under
+/// `fs.protected_regular`). Mapped to [`exit_code::LOCK_BUSY`]; the message says
+/// which and how to fix it. Distinct from "needs root" so it is never mislabeled.
 #[derive(Debug)]
 struct LockBusy(String);
 
@@ -293,20 +296,28 @@ pub fn run() -> ExitCode {
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            // Upgrade permission errors to a typed, friendly error so the exit code
-            // is distinct and the message is actionable — but keep the original
-            // error as the cause (via `.context`) so the underlying failure stays
-            // diagnosable in `{err:#}`/logs rather than being swallowed.
-            let err = if is_permission_error(&err) {
-                err.context(PermissionDenied)
-            } else {
-                err
-            };
+            let err = classify(err);
             // Log at error level so the failure is captured in `2>mybtrfs.log`.
             log::error!("{err:#}");
             eprintln!("error: {err:#}");
             ExitCode::from(exit_code_for(&err))
         }
+    }
+}
+
+/// Final error classification for the process exit. An already-typed error (usage,
+/// lock) keeps its code and message; only an *otherwise-unclassified* permission
+/// failure (a btrfs command that genuinely needed root) is relabeled
+/// [`PermissionDenied`] — with the original kept as the cause (via `.context`) so
+/// it stays diagnosable. The typed-error guard is what stops a lock-file
+/// "Permission denied" from being mis-reported as "needs root".
+fn classify(err: anyhow::Error) -> anyhow::Error {
+    if err.downcast_ref::<UsageError>().is_some() || err.downcast_ref::<LockBusy>().is_some() {
+        err
+    } else if is_permission_error(&err) {
+        err.context(PermissionDenied)
+    } else {
+        err
     }
 }
 
@@ -674,10 +685,18 @@ fn effective_uid() -> u32 {
 /// [`LockBusy`] (process exit code 3).
 fn acquire_lock(override_path: Option<&Path>) -> Result<FileLock> {
     let path = lock_path(override_path);
-    match FileLock::acquire(&path)? {
-        Some(lock) => Ok(lock),
-        None => Err(anyhow::Error::new(LockBusy(format!(
+    match FileLock::acquire(&path) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(anyhow::Error::new(LockBusy(format!(
             "another mybtrfs run holds the lock: {}",
+            path.display()
+        )))),
+        // The lock file could not be opened at all (e.g. owned by another user in
+        // a sticky dir under `fs.protected_regular`). Report it as a lock problem
+        // with an actionable fix — never as a panic or a misleading "needs root".
+        Err(err) => Err(anyhow::Error::new(LockBusy(format!(
+            "could not open the run lock {}: {err} — it may be owned by another \
+             user; pass --lock <PATH> to use a different one",
             path.display()
         )))),
     }
@@ -1268,6 +1287,34 @@ mod tests {
         // effective_uid agrees with the file the current process would own; for a
         // normal test run that's the invoking user's uid (non-panicking).
         let _ = effective_uid();
+    }
+
+    #[test]
+    fn an_unopenable_lock_is_a_clean_lock_error_not_a_crash() {
+        // A directory can't be opened as a lock file (EISDIR) — the same shape as
+        // the EACCES a foreign-owned lock would give. It must surface as a clear
+        // lock error (exit 3), never a panic.
+        let err = acquire_lock(Some(std::env::temp_dir().as_path())).unwrap_err();
+        assert_eq!(exit_code_for(&err), exit_code::LOCK_BUSY);
+    }
+
+    #[test]
+    fn classify_does_not_mislabel_a_lock_permission_error_as_needs_root() {
+        // A lock failure whose cause is a literal "Permission denied" must stay a
+        // lock error (exit 3) — not be hijacked into "needs root" (exit 4).
+        let lock = anyhow::Error::new(LockBusy(
+            "could not open the run lock /tmp/mybtrfs-0.lock: Permission denied".to_owned(),
+        ));
+        assert_eq!(exit_code_for(&classify(lock)), exit_code::LOCK_BUSY);
+        // A genuine btrfs-command permission failure (unclassified) still becomes
+        // the friendly needs-root error (exit 4).
+        let btrfs = anyhow::Error::new(PortError::Command(
+            "`btrfs` exited unsuccessfully (1): ERROR: ... Permission denied".to_owned(),
+        ));
+        assert_eq!(
+            exit_code_for(&classify(btrfs)),
+            exit_code::PERMISSION_DENIED
+        );
     }
 
     #[test]
