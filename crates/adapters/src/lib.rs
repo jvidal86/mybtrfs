@@ -27,6 +27,10 @@ pub use drive_discovery::LsblkDriveDiscovery;
 /// Filesystem operations: [`LocalFsAdapter`] (`std::fs`) — existence / mkdir / rename.
 pub use local_fs::LocalFsAdapter;
 
+/// Prompters: [`StdioPrompter`] (interactive stdin/stdout) and [`AutoPrompter`]
+/// (`--yes`/non-interactive — auto-confirm, auto-resolve a single choice).
+pub use prompter::{AutoPrompter, StdioPrompter};
+
 /// Initialize `env_logger` once for unit tests (idempotent; safe to call from
 /// every `#[test]`). Logs go through the test harness and appear only for
 /// failing tests unless `--nocapture` is passed.
