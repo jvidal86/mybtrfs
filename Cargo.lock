@@ -374,6 +374,7 @@ name = "mybtrfs-adapters"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "env_logger",
  "log",
  "mybtrfs-application",
  "mybtrfs-domain",
@@ -387,6 +388,7 @@ name = "mybtrfs-application"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "env_logger",
  "log",
  "mybtrfs-domain",
  "thiserror",
