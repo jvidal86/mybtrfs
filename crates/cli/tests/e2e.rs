@@ -9,7 +9,9 @@
 //! ```
 //!
 //! Scenario from `documentation/05-e2e-test-spec.md`: a full backup
-//! (snapshot → send/receive → verify) proving the whole stack against real btrfs.
+//! (snapshot → send/receive → verify) followed by a restore leg (P4-01..04:
+//! writable + no received_uuid, refuse-without-force, `--force` move-aside),
+//! proving the whole stack against real btrfs.
 //!
 //! NOTE: written but unvalidated in the CI sandbox (no root / no user namespaces);
 //! the first real run is the actual proof of `run`.
@@ -138,6 +140,67 @@ fn run_full_backup_against_real_btrfs() {
     assert!(
         matches!(received, Some(uuid) if uuid != "-" && !uuid.is_empty()),
         "backup must carry a received_uuid:\n{show}"
+    );
+
+    // --- Restore leg (documentation/05 §6, P4-01..04) ----------------------
+    // Restore the backup to a fresh writable subvolume on the pool.
+    let backup = &backups[0];
+    let dest = pool.path("home_restored");
+    let status = Command::new(env!("CARGO_BIN_EXE_mybtrfs"))
+        .args(["restore", backup.to_str().unwrap(), dest.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "`mybtrfs restore` exited non-zero");
+
+    // The restored subvol must be READ-WRITE with an EMPTY received_uuid — the
+    // `make_writable` trap (P4-01/02, invariant #7): a plain `snapshot` without
+    // `-r`, never `property set ro=false` (which would forge a received_uuid).
+    let restored_show = sh("btrfs", &["subvolume", "show", dest.to_str().unwrap()]);
+    assert!(
+        !restored_show.contains("readonly"),
+        "restored subvolume must be writable:\n{restored_show}"
+    );
+    let restored_received = restored_show
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Received UUID:"))
+        .map(str::trim);
+    assert!(
+        matches!(restored_received, None | Some("-") | Some("")),
+        "restored subvolume must NOT carry a received_uuid:\n{restored_show}"
+    );
+    // Content survived the restore.
+    assert_eq!(
+        fs::read(dest.join("data.txt")).unwrap(),
+        b"hello mybtrfs",
+        "restored content must match the source"
+    );
+
+    // P4-03: restoring onto an existing dest WITHOUT --force is refused.
+    let refused = Command::new(env!("CARGO_BIN_EXE_mybtrfs"))
+        .args(["restore", backup.to_str().unwrap(), dest.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(
+        !refused.success(),
+        "restore onto an existing dest without --force must fail"
+    );
+
+    // P4-04: --force moves the existing dest aside to `<dest>.broken`, succeeds.
+    let forced = Command::new(env!("CARGO_BIN_EXE_mybtrfs"))
+        .args([
+            "restore",
+            backup.to_str().unwrap(),
+            dest.to_str().unwrap(),
+            "--force",
+        ])
+        .status()
+        .unwrap();
+    assert!(forced.success(), "`mybtrfs restore --force` exited non-zero");
+    let moved_aside = pool.path("home_restored.broken");
+    assert!(
+        moved_aside.exists(),
+        "the displaced destination should be at {}",
+        moved_aside.display()
     );
 }
 
