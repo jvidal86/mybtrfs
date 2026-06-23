@@ -294,9 +294,11 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             // Upgrade permission errors to a typed, friendly error so the exit code
-            // is distinct and the message is actionable.
+            // is distinct and the message is actionable — but keep the original
+            // error as the cause (via `.context`) so the underlying failure stays
+            // diagnosable in `{err:#}`/logs rather than being swallowed.
             let err = if is_permission_error(&err) {
-                anyhow::Error::new(PermissionDenied)
+                err.context(PermissionDenied)
             } else {
                 err
             };
