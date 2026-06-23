@@ -32,18 +32,22 @@ red→green TDD.
 - `application`: `backup` (run/resume), `prune`, `restore` (incl. transfer-back),
   `inventory` (list/stats), `retention`, and the `ports`.
 - `adapters`: `btrfs_cli` (subvolume/snapshot/transfer/delete + mount-table
-  resolution), `local_fs`, `drive_discovery`, `clock`, `prompter`, `journal`,
-  `lock`.
+  resolution), `ssh` (remote `ssh://` endpoints — runner + mount table), `local_fs`,
+  `drive_discovery`, `clock`, `prompter`, `journal`, `lock`.
 - `cli`: the full command set + global flags (`--yes`/`--journal`/`--lock`),
   exit-code taxonomy, and the run lock.
-- **~186 unit/integration tests**, all passing; `clippy` (pedantic subset) and
+- **~196 unit/integration tests**, all passing; `clippy` (pedantic subset) and
   `fmt` clean; MSRV 1.89.
 
 **What remains:** the loopback-btrfs e2e suite and the differential-oracle harness
 (`crates/cli/tests/{e2e,diff_btrbk_schedule}.rs`) are written but **`#[ignore]`d** —
 they need root/loopback (and `faketime` + a real btrbk for the oracle), so they are
-validated on a real host/CI, not in the sandbox. Phase 5+ (config file, remote/ssh,
-raw/encrypted targets, scheduling) is out of scope.
+validated on a real host/CI, not in the sandbox. **Phase 5 §2 (remote/ssh) is
+implemented** — backup, incremental, prune, and restore all work over `ssh://`
+endpoints, validated end-to-end against a real host
+(`contrib/test/mybtrfs-ssh-smoke.sh`). **Scheduling is shipped** in `contrib/`. The
+remaining Phase 5 items (raw/encrypted targets, an optional backup-set file) are
+design-only (`08`/`09`), needing real infra (GPG) to validate.
 
 ## Workspace layout — the dependency rule is compiler-enforced
 
@@ -93,7 +97,7 @@ their originals.**
   conformance test that runs btrbk (the reference oracle) and mybtrfs over the same
   loopback fixture and compares resulting btrfs state (harness in
   `crates/cli/tests/diff_btrbk_schedule.rs`, gated).
-- **`07-implementation-decisions.md`** — the ADR-style decision log (ID-1…ID-6).
+- **`07-implementation-decisions.md`** — the ADR-style decision log (ID-1…ID-7).
 - **`08-phase5-design.md`** — Phase 5+ design (scheduling, SSH, raw/encrypted,
   backup-set file); each slots behind the existing ports. Scheduling is shipped in
   `contrib/`; SSH §2 is implemented and validated end-to-end; the rest is
@@ -136,11 +140,13 @@ injected (`ClockPort`), since `short`/`long` timestamps are local-time.
 4. **Safe restore** — transfer back + writable snapshot, guarding the
    received-uuid trap.
 
-The four phases are implemented. **Phase 5+** (remote/ssh, raw/encrypted targets,
-optional config) is designed in `08-phase5-design.md` but unbuilt — it needs real
-infrastructure (a second host, GPG) to validate, so it is not done in-sandbox.
-**Scheduling is shipped** in `contrib/` (systemd timer + cron drop-ins that invoke
-the CLI; no daemon, no config).
+The four phases are implemented. **Phase 5 §2 (remote/ssh) is also implemented and
+validated end-to-end** — backup/incremental/prune/restore over `ssh://` endpoints
+(the per-uid run lock it exposed is decision ID-7). The remaining Phase 5 items
+(raw/encrypted targets, an optional backup-set file) are designed in
+`08-phase5-design.md` / `09-roadmap.md` but unbuilt — they need real infrastructure
+(GPG) to validate, so they are not done in-sandbox. **Scheduling is shipped** in
+`contrib/` (systemd timer + cron drop-ins that invoke the CLI; no daemon, no config).
 
 ## Invariants any implementation MUST preserve
 
