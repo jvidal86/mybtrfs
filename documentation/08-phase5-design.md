@@ -72,11 +72,15 @@ key can run only btrfs send/receive (see `../btrbk/btrbk/doc/` and
 against a real host: a btrfs stream piped into `ssh host -- sudo btrfs receive`
 produced a readonly subvolume with a `received_uuid` (#1), and remote
 `btrfs subvolume show` returns the verification fields.
+A full `mybtrfs run … ssh://user@host/path` was **validated end-to-end on
+2026-06-23** against a real host: a loopback btrfs source → local snapshot →
+`btrfs send | ssh … sudo btrfs receive` produced `/mnt/btrfs-test/data.<ts>`,
+verified readonly with a Received UUID. Reproducible via
+`contrib/test/mybtrfs-ssh-smoke.sh`.
+
 **Still open:** remote *pruning* of the target (the single-deleter prune path needs
 a per-endpoint deleter), so a remote target currently requires the keep-all floor
-(`--target-preserve-min all`); and *restore from* a remote source (the reverse
-pipe). A full `mybtrfs run` end-to-end over ssh validates on a host with a btrfs
-source (the sandbox has neither root nor btrfs).
+(`--target-preserve-min all`); and *restore from* a remote source (the reverse pipe).
 
 ---
 
