@@ -195,7 +195,10 @@ fn run_full_backup_against_real_btrfs() {
         ])
         .status()
         .unwrap();
-    assert!(forced.success(), "`mybtrfs restore --force` exited non-zero");
+    assert!(
+        forced.success(),
+        "`mybtrfs restore --force` exited non-zero"
+    );
     let moved_aside = pool.path("home_restored.broken");
     assert!(
         moved_aside.exists(),
