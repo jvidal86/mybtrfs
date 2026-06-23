@@ -80,6 +80,21 @@ impl<'a> PruneService<'a> {
             backup_preserve.extend(pair.backups.iter().map(|b| b.id));
         }
 
+        // Invariant #5: a missing destination must not cost the only resumable
+        // copy. If the source has snapshots but the target lists ZERO backups, the
+        // target is treated as unreachable/aborted (e.g. root-on-btrfs where an
+        // unmounted drive's mountpoint resolves to `/`, yielding no backups) — so
+        // ALL source-snapshot deletions are rescued. The backup side still prunes
+        // normally (it has nothing to delete).
+        let target_aborted = !snapshots.is_empty() && backups.is_empty();
+        if target_aborted {
+            log::warn!(
+                "target appears unreachable (no backups for {} source snapshots); \
+                 skipping all snapshot deletion (invariant #5)",
+                snapshots.len()
+            );
+        }
+
         let backups_pruned = self.retention.prune(
             &backups,
             target_policy,
@@ -94,7 +109,7 @@ impl<'a> PruneService<'a> {
             snapshot_policy,
             &SafetyContext {
                 force_preserve_ids: snapshot_preserve,
-                target_aborted: false,
+                target_aborted,
             },
             DeleteCommit::Deferred,
         )?;
@@ -297,5 +312,100 @@ mod tests {
                 "/mnt/pool/.mybtrfs_snapshots/home.20240102T1200"
             )]
         );
+    }
+
+    #[test]
+    fn empty_target_treated_as_aborted_rescues_all_source_snapshots() {
+        crate::init_test_logger();
+        let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        // Source snapshots present, but the TARGET is empty (invariant #5: an
+        // unmounted/unreachable drive — e.g. root-on-btrfs where the mountpoint
+        // resolves to `/` — lists zero backups). The snapshots are the only
+        // resumable copies and must NOT be pruned.
+        let source = FakeRepo {
+            subvols: vec![
+                ro(
+                    1,
+                    1,
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240101T1200",
+                    5,
+                ),
+                ro(
+                    2,
+                    2,
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240102T1200",
+                    10,
+                ),
+            ],
+        };
+        let target = FakeRepo { subvols: vec![] };
+        let service = PruneService::new(&source, &target, &retention);
+
+        let aggressive = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            ..Default::default()
+        };
+        let report = service
+            .prune(
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                Path::new("/mnt/drive/host"),
+                &aggressive,
+                &aggressive,
+            )
+            .expect("prune succeeds");
+
+        // ZERO source snapshots deleted: the empty target is treated as aborted.
+        assert!(
+            report.snapshots_pruned.delete.is_empty(),
+            "no source snapshot may be pruned when the target is unreachable"
+        );
+        let preserved: Vec<u64> = report
+            .snapshots_pruned
+            .preserve
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(preserved.contains(&1));
+        assert!(preserved.contains(&2));
+        // No source snapshot path was ever handed to the delete port.
+        assert!(
+            !deleter.paths().iter().any(|p| p.starts_with("/mnt/pool")),
+            "no source snapshot deletion may reach the delete port"
+        );
+    }
+
+    #[test]
+    fn empty_source_and_empty_target_prunes_nothing() {
+        crate::init_test_logger();
+        let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        // Both sides empty: nothing to prune and no spurious aborted behavior.
+        let source = FakeRepo { subvols: vec![] };
+        let target = FakeRepo { subvols: vec![] };
+        let service = PruneService::new(&source, &target, &retention);
+
+        let aggressive = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            ..Default::default()
+        };
+        let report = service
+            .prune(
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                Path::new("/mnt/drive/host"),
+                &aggressive,
+                &aggressive,
+            )
+            .expect("prune succeeds");
+
+        assert!(deleter.paths().is_empty());
+        assert!(report.snapshots_pruned.delete.is_empty());
+        assert!(report.backups_pruned.delete.is_empty());
     }
 }

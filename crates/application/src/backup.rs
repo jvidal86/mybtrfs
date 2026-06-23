@@ -363,6 +363,20 @@ impl<'a> BackupService<'a> {
             backup_preserve.extend(pair.backups.iter().map(|b| b.id));
         }
 
+        // Invariant #5: if the source has snapshots but the target lists ZERO
+        // backups, the target is unreachable/aborted — rescue all snapshot
+        // deletions so a missing destination can't cost the only resumable copy.
+        // (On `run`/`resume` the just-transferred backup is already in `backups`,
+        // so this normally only trips when the target genuinely has nothing.)
+        let target_aborted = !snapshots.is_empty() && backups.is_empty();
+        if target_aborted {
+            log::warn!(
+                "target appears unreachable (no backups for {} source snapshots); \
+                 skipping all snapshot deletion (invariant #5)",
+                snapshots.len()
+            );
+        }
+
         let backups_pruned = self.retention.prune(
             backups,
             target_policy,
@@ -377,7 +391,7 @@ impl<'a> BackupService<'a> {
             snapshot_policy,
             &SafetyContext {
                 force_preserve_ids: snapshot_preserve,
-                target_aborted: false,
+                target_aborted,
             },
             DeleteCommit::Deferred,
         )?;
@@ -401,12 +415,12 @@ impl<'a> BackupService<'a> {
             .map_err(|err| PortError::Verification(err.to_string()))?;
         let target_graph = RelationshipGraph::build(target_backups.to_vec())
             .map_err(|err| PortError::Verification(err.to_string()))?;
-        Ok(best_parent(
-            snapshot,
-            &source_graph,
-            &target_graph,
-            self.incremental,
-        ))
+        // Strict refusal surfaces as a verification error so `run`/`resume` ABORT
+        // (invariant: never silently fall back to a full send under Strict).
+        best_parent(snapshot, &source_graph, &target_graph, self.incremental).map_err(|err| {
+            log::error!("parent resolution refused: {err}");
+            PortError::Verification(err.to_string())
+        })
     }
 
     /// List the subvolumes directly in `dir` (via `repo`, scoped to that
@@ -501,6 +515,26 @@ mod tests {
                 .borrow_mut()
                 .push((source.to_path_buf(), dest.to_path_buf()));
             Ok(fake_subvol(dest))
+        }
+        fn make_writable(&self, _source: &Path, _dest: &Path) -> Result<Subvolume, PortError> {
+            unimplemented!("restore path not exercised by this test")
+        }
+    }
+
+    /// A `SnapshotPort` returning a read-only snapshot whose `parent_uuid` is the
+    /// (live) source subvolume's uuid — the production reality: every read-only
+    /// snapshot of one source shares that source's uuid as its parent_uuid, and
+    /// the live source is never inside `snapshot_dir`. Lets Strict-mode tests
+    /// exercise the parent_uuid related-walk over genuine siblings.
+    struct ParentedSnapshot {
+        /// The live source subvolume's uuid, stamped as the snapshot's parent_uuid.
+        source_uuid: Uuid,
+    }
+    impl SnapshotPort for ParentedSnapshot {
+        fn create_readonly(&self, _source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
+            let mut sv = fake_subvol(dest);
+            sv.parent_uuid = Some(self.source_uuid.clone());
+            Ok(sv)
         }
         fn make_writable(&self, _source: &Path, _dest: &Path) -> Result<Subvolume, PortError> {
             unimplemented!("restore path not exercised by this test")
@@ -641,6 +675,22 @@ mod tests {
             fs_uuid: uuid_hex(0),
             mountpoint: PathBuf::from(mount),
         }
+    }
+
+    /// A pre-existing read-only source snapshot carrying `parent` as its
+    /// `parent_uuid` — a sibling of the other snapshots of the same live source.
+    fn ro_parented(
+        id: u64,
+        uuid: Uuid,
+        parent: Uuid,
+        received: Option<Uuid>,
+        mount: &str,
+        rel: &str,
+        cgen: u64,
+    ) -> Subvolume {
+        let mut sv = ro_cgen(id, uuid, received, mount, rel, cgen);
+        sv.parent_uuid = Some(parent);
+        sv
     }
 
     #[test]
@@ -1299,5 +1349,188 @@ mod tests {
         // The uncorrelated orphans are still pruned.
         assert!(report.snapshots_pruned.delete.iter().any(|s| s.id == 5));
         assert!(report.backups_pruned.delete.iter().any(|b| b.id == 22));
+    }
+
+    #[test]
+    fn run_strict_refuses_when_no_correlated_related_parent() {
+        crate::init_test_logger();
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        // A prior sibling snapshot exists on the source (sharing the live source's
+        // uuid as parent_uuid), but it has NO correlated backup on the target.
+        let source_uuid = uuid_hex(999);
+        let source_repo = FakeRepo {
+            subvols: vec![ro_parented(
+                1,
+                uuid_hex(1),
+                source_uuid.clone(),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1200",
+                5,
+            )],
+        };
+        // Target is empty: nothing the prior snapshot correlates to.
+        let target_repo = FakeRepo::default();
+        let snapshots = ParentedSnapshot {
+            source_uuid: source_uuid.clone(),
+        };
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::with_incremental(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+            Incremental::Strict,
+        );
+
+        let result = service.run(
+            Path::new("/mnt/pool/home"),
+            Path::new("/mnt/pool/.mybtrfs_snapshots"),
+            "home",
+            Path::new("/mnt/drive/host"),
+            &RetentionPolicy::default(),
+            &RetentionPolicy::default(),
+        );
+
+        // Strict must REFUSE — never silently fall back to a full send.
+        assert!(
+            matches!(result, Err(PortError::Verification(_))),
+            "strict run with no correlated related parent must error, got {result:?}"
+        );
+        assert!(
+            transfer.calls().is_empty(),
+            "strict refusal must not transfer anything"
+        );
+    }
+
+    #[test]
+    fn resume_strict_refuses_when_no_correlated_related_parent() {
+        crate::init_test_logger();
+        let clock = FixedClock::at("2024-02-01T00:00:00+00:00");
+        // Two sibling snapshots of the same live source (shared parent_uuid), and a
+        // target with no correlated backup of either — so Strict has no parent.
+        let source_uuid = uuid_hex(999);
+        let source_repo = FakeRepo {
+            subvols: vec![
+                ro_parented(
+                    1,
+                    uuid_hex(1),
+                    source_uuid.clone(),
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240101T1200",
+                    5,
+                ),
+                ro_parented(
+                    2,
+                    uuid_hex(2),
+                    source_uuid.clone(),
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240102T1200",
+                    10,
+                ),
+            ],
+        };
+        let target_repo = FakeRepo::default();
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::with_incremental(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+            Incremental::Strict,
+        );
+
+        let result = service.resume(
+            Path::new("/mnt/pool/.mybtrfs_snapshots"),
+            "home",
+            Path::new("/mnt/drive/host"),
+            &RetentionPolicy::default(),
+            &RetentionPolicy::default(),
+        );
+
+        assert!(
+            matches!(result, Err(PortError::Verification(_))),
+            "strict resume with no correlated related parent must error, got {result:?}"
+        );
+        assert!(
+            transfer.calls().is_empty(),
+            "strict refusal must not transfer anything"
+        );
+    }
+
+    #[test]
+    fn run_strict_accepts_a_related_correlated_sibling_as_parent() {
+        crate::init_test_logger();
+        let clock = FixedClock::at("2024-01-02T15:31:00+00:00");
+        // A prior sibling snapshot (1) sharing the live source's uuid as
+        // parent_uuid, WITH a correlated backup (11) on the target → a genuine,
+        // parent_uuid-related, correlated parent that Strict must accept.
+        let source_uuid = uuid_hex(999);
+        let source_repo = FakeRepo {
+            subvols: vec![ro_parented(
+                1,
+                uuid_hex(1),
+                source_uuid.clone(),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1200",
+                5,
+            )],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![ro(
+                11,
+                uuid_hex(11),
+                Some(uuid_hex(1)),
+                "/mnt/drive",
+                "host/home.20240101T1200",
+            )],
+        };
+        let snapshots = ParentedSnapshot {
+            source_uuid: source_uuid.clone(),
+        };
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::with_incremental(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+            Incremental::Strict,
+        );
+
+        service
+            .run(
+                Path::new("/mnt/pool/home"),
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                "home",
+                Path::new("/mnt/drive/host"),
+                &RetentionPolicy::default(),
+                &RetentionPolicy::default(),
+            )
+            .expect("strict run with a related correlated sibling succeeds");
+
+        let calls = transfer.calls();
+        assert_eq!(calls.len(), 1);
+        let (_, selection, _) = &calls[0];
+        // The related, correlated sibling (1) is used as the -p parent.
+        assert_eq!(selection.parent.as_ref().map(|p| p.id), Some(1));
     }
 }

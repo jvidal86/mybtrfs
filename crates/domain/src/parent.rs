@@ -42,6 +42,19 @@ pub struct ParentSelection {
     pub clone_sources: Vec<Subvolume>,
 }
 
+/// Why a parent could not be resolved. The only failure mode is a [`Incremental::Strict`]
+/// request with no eligible parent — Strict **refuses** rather than falling back to
+/// a full send (the orchestrator must abort, never transfer a full backup).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParentError {
+    /// Strict mode required a `parent_uuid`-related, correlated parent but none
+    /// qualified. A full fallback is forbidden, so the operation must abort.
+    #[error(
+        "strict incremental requires a parent_uuid-related parent with a correlated copy on the target, but none was found"
+    )]
+    NoStrictParent,
+}
+
 /// Whether two read-only subvolumes are correlated (hold the same content).
 /// Mirrors btrbk `_is_correlated`.
 #[must_use]
@@ -89,6 +102,16 @@ pub fn related<'a>(graph: &'a RelationshipGraph, snapshot: &Subvolume) -> Vec<&'
     if let Some(top_uuid) = &top.uuid {
         queue.push_back(top_uuid.clone());
     }
+    // The chain-top's own parent_uuid bucket holds its SIBLINGS. In production
+    // every read-only snapshot of one source shares that live source's uuid as
+    // parent_uuid, but the live source is never inside snapshot_dir, so the
+    // common parent node is absent from the graph and the climb stops at the
+    // snapshot itself. Seeding from the parent_uuid bucket recovers the siblings
+    // (subvolumes sharing the chain-top's parent_uuid) that the uuid-descendant
+    // walk alone would miss.
+    if let Some(top_parent_uuid) = &top.parent_uuid {
+        queue.push_back(top_parent_uuid.clone());
+    }
     while let Some(uuid) = queue.pop_front() {
         if !visited_uuids.insert(uuid.clone()) {
             continue;
@@ -106,15 +129,20 @@ pub fn related<'a>(graph: &'a RelationshipGraph, snapshot: &Subvolume) -> Vec<&'
 }
 
 /// Resolve the incremental parent and clone sources for `snapshot`.
-#[must_use]
+///
+/// # Errors
+/// [`ParentError::NoStrictParent`] when `mode` is [`Incremental::Strict`] and no
+/// `parent_uuid`-related candidate has a correlated copy on the target. Strict
+/// **refuses** rather than falling back to a full send. [`Incremental::Yes`] and
+/// [`Incremental::No`] never error (they return a full-send selection instead).
 pub fn best_parent(
     snapshot: &Subvolume,
     source: &RelationshipGraph,
     target: &RelationshipGraph,
     mode: Incremental,
-) -> ParentSelection {
+) -> Result<ParentSelection, ParentError> {
     if mode == Incremental::No {
-        return ParentSelection::default();
+        return Ok(ParentSelection::default());
     }
 
     // Candidate parents: source-side, read-only, not the snapshot, reachable on
@@ -135,7 +163,11 @@ pub fn best_parent(
         .collect();
 
     if candidates.is_empty() {
-        return ParentSelection::default();
+        // Strict must REFUSE — never silently fall back to a full send.
+        if mode == Incremental::Strict {
+            return Err(ParentError::NoStrictParent);
+        }
+        return Ok(ParentSelection::default());
     }
 
     // Parent = newest candidate not newer than the snapshot; else oldest newer.
@@ -153,10 +185,10 @@ pub fn best_parent(
         .unwrap_or(candidates.len() - 1);
     let parent = candidates.remove(parent_pos);
 
-    ParentSelection {
+    Ok(ParentSelection {
         parent: Some(parent.clone()),
         clone_sources: candidates.into_iter().cloned().collect(),
-    }
+    })
 }
 
 /// The correlated copies of `subvol` present on `target` (deduplicated by id).
@@ -287,6 +319,24 @@ mod tests {
         assert!(!ids.contains(&4));
     }
 
+    #[test]
+    fn related_finds_siblings_when_common_parent_absent_from_graph() {
+        // Production reality: every read-only snapshot of one source shares that
+        // LIVE source's uuid as its parent_uuid, but the live source itself is
+        // never inside snapshot_dir, so it is NEVER in the graph. The siblings
+        // must still be found via the shared (absent) parent_uuid bucket.
+        let g = RelationshipGraph::build(vec![
+            sv(1, "1", Some("d"), None, true, 10, "f"),
+            sv(2, "2", Some("d"), None, true, 20, "f"),
+            sv(3, "3", Some("d"), None, true, 30, "f"),
+        ])
+        .unwrap();
+        let s1 = sv(1, "1", Some("d"), None, true, 10, "f");
+        let mut ids: Vec<u64> = related(&g, &s1).iter().map(|s| s.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2, 3]);
+    }
+
     // --- best_parent ---
 
     fn source_with_three_snaps() -> RelationshipGraph {
@@ -309,7 +359,7 @@ mod tests {
         .unwrap();
         let snap = sv(3, "3", Some("d"), None, true, 30, "f");
 
-        let sel = best_parent(&snap, &source, &target, Incremental::Yes);
+        let sel = best_parent(&snap, &source, &target, Incremental::Yes).unwrap();
         assert_eq!(sel.parent.map(|p| p.id), Some(2));
         let mut clones: Vec<u64> = sel.clone_sources.iter().map(|s| s.id).collect();
         clones.sort_unstable();
@@ -322,7 +372,7 @@ mod tests {
         let target = RelationshipGraph::build(vec![]).unwrap();
         let snap = sv(3, "3", Some("d"), None, true, 30, "f");
 
-        let sel = best_parent(&snap, &source, &target, Incremental::Yes);
+        let sel = best_parent(&snap, &source, &target, Incremental::Yes).unwrap();
         assert!(sel.parent.is_none());
         assert!(sel.clone_sources.is_empty());
     }
@@ -334,7 +384,7 @@ mod tests {
             RelationshipGraph::build(vec![sv(11, "a", None, Some("2"), true, 5, "c")]).unwrap();
         let snap = sv(3, "3", Some("d"), None, true, 30, "f");
 
-        let sel = best_parent(&snap, &source, &target, Incremental::No);
+        let sel = best_parent(&snap, &source, &target, Incremental::No).unwrap();
         assert!(sel.parent.is_none());
         assert!(sel.clone_sources.is_empty());
     }
@@ -350,7 +400,7 @@ mod tests {
             RelationshipGraph::build(vec![sv(11, "a", None, Some("8"), true, 5, "c")]).unwrap();
         let snap = sv(3, "3", Some("d"), None, true, 30, "f");
 
-        let sel = best_parent(&snap, &source, &target, Incremental::Yes);
+        let sel = best_parent(&snap, &source, &target, Incremental::Yes).unwrap();
         assert!(sel.parent.is_none());
     }
 
@@ -366,10 +416,12 @@ mod tests {
             RelationshipGraph::build(vec![sv(11, "a", None, Some("9"), true, 5, "c")]).unwrap();
         let snap = sv(3, "3", Some("d"), None, true, 30, "f");
 
-        let yes = best_parent(&snap, &source, &target, Incremental::Yes);
+        let yes = best_parent(&snap, &source, &target, Incremental::Yes).unwrap();
         assert_eq!(yes.parent.map(|p| p.id), Some(9));
 
+        // The correlated candidate (9) is NOT parent_uuid-related to the snapshot
+        // (different parent_uuid), so Strict refuses rather than falling back.
         let strict = best_parent(&snap, &source, &target, Incremental::Strict);
-        assert!(strict.parent.is_none());
+        assert_eq!(strict, Err(ParentError::NoStrictParent));
     }
 }
