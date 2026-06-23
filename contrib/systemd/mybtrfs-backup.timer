@@ -1,0 +1,15 @@
+[Unit]
+Description=Run mybtrfs-backup.service on a schedule
+Documentation=https://github.com/jvidal86/mybtrfs
+
+[Timer]
+# Daily, shortly after midnight. Adjust to taste (see systemd.time(7)):
+#   hourly | daily | weekly | *-*-* 02,14:00:00 | etc.
+OnCalendar=daily
+# Catch up on a missed run (e.g. the machine was off) at next boot.
+Persistent=true
+# Spread load if several timers fire together.
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

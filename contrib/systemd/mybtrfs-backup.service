@@ -1,0 +1,24 @@
+[Unit]
+Description=mybtrfs btrfs backup (one shot)
+Documentation=https://github.com/jvidal86/mybtrfs
+# Only run while the backup target is mounted — edit to match your target's
+# automatically-generated mount unit (e.g. mnt-backup.mount):
+# RequiresMountsFor=/mnt/backup
+
+[Service]
+Type=oneshot
+
+# Backup parameters: copy contrib/systemd/mybtrfs.env.example to
+# /etc/default/mybtrfs and edit it. mybtrfs stays CLI-driven — systemd only
+# supplies the arguments and the schedule.
+EnvironmentFile=/etc/default/mybtrfs
+
+# btrfs requires root; run unprivileged and mybtrfs exits 4 ("re-run with sudo").
+# --yes: non-interactive (no prompts).   --lock: refuse overlapping runs (exit 3).
+# --journal: append a timestamped audit line per invocation.
+# For retention, append e.g. --snapshot-preserve "48h 14d 8w" --target-preserve "14d 12w 12m".
+ExecStart=/usr/local/bin/mybtrfs run ${MYBTRFS_SOURCE} ${MYBTRFS_SNAPSHOT_DIR} ${MYBTRFS_BASENAME} ${MYBTRFS_TARGET} --yes --lock /run/mybtrfs.lock --journal /var/log/mybtrfs.log
+
+# Be a good background citizen.
+Nice=15
+IOSchedulingClass=idle

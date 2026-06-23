@@ -91,7 +91,12 @@ their originals.**
   with a traceability matrix back to the §6 invariants.
 - **`06-differential-oracle-test-spec.md`** — differential ("back-to-back")
   conformance test that runs btrbk (the reference oracle) and mybtrfs over the same
-  loopback fixture and compares resulting btrfs state (design-only until the CLI lands).
+  loopback fixture and compares resulting btrfs state (harness in
+  `crates/cli/tests/diff_btrbk_schedule.rs`, gated).
+- **`07-implementation-decisions.md`** — the ADR-style decision log (ID-1…ID-6).
+- **`08-phase5-design.md`** — Phase 5+ design (scheduling, SSH, raw/encrypted,
+  backup-set file); each slots behind the existing ports. Scheduling is shipped in
+  `contrib/`; the rest is design-only (needs real infra to validate).
 - `03-review-and-corrections.md` — the review trail (history).
 
 ## Reference implementation
@@ -125,8 +130,11 @@ injected (`ClockPort`), since `short`/`long` timestamps are local-time.
 4. **Safe restore** — transfer back + writable snapshot, guarding the
    received-uuid trap.
 
-Phase 5+ (config file, remote/ssh, raw/encrypted targets, scheduling) is out of
-scope until the four phases land.
+The four phases are implemented. **Phase 5+** (remote/ssh, raw/encrypted targets,
+optional config) is designed in `08-phase5-design.md` but unbuilt — it needs real
+infrastructure (a second host, GPG) to validate, so it is not done in-sandbox.
+**Scheduling is shipped** in `contrib/` (systemd timer + cron drop-ins that invoke
+the CLI; no daemon, no config).
 
 ## Invariants any implementation MUST preserve
 

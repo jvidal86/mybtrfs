@@ -1,0 +1,44 @@
+# contrib — scheduling mybtrfs
+
+mybtrfs is CLI-first and stateless: there is no daemon and no config file. To run
+backups on a schedule you simply invoke `mybtrfs run …` from your system's
+scheduler. These drop-ins do exactly that, using the flags built for unattended
+use — `--yes` (no prompts), `--lock` (refuse overlapping runs → exit 3), and
+`--journal` (append an audit line per run). btrfs needs root, so run them as root
+(otherwise mybtrfs exits 4 with "re-run with sudo").
+
+## systemd (recommended)
+
+```sh
+sudo install -m0644 systemd/mybtrfs-backup.service /etc/systemd/system/
+sudo install -m0644 systemd/mybtrfs-backup.timer   /etc/systemd/system/
+sudo install -m0640 systemd/mybtrfs.env.example    /etc/default/mybtrfs
+sudoedit /etc/default/mybtrfs            # set SOURCE / SNAPSHOT_DIR / BASENAME / TARGET
+sudo systemctl daemon-reload
+sudo systemctl enable --now mybtrfs-backup.timer
+
+systemctl list-timers mybtrfs-backup.timer   # when it next fires
+sudo systemctl start mybtrfs-backup.service   # run once now, to test
+journalctl -u mybtrfs-backup.service          # see the result
+```
+
+Edit `mybtrfs-backup.timer` (`OnCalendar=`) for a different cadence, and
+`mybtrfs-backup.service` (`ExecStart=`) to add retention flags or back up several
+subvolumes (one service/timer pair per subvolume, or several `ExecStart=` lines).
+`RequiresMountsFor=` is the clean way to skip a run when the backup drive is absent.
+
+## cron
+
+```sh
+sudo install -m0644 cron/mybtrfs.crontab /etc/cron.d/mybtrfs
+sudoedit /etc/cron.d/mybtrfs            # set the paths
+```
+
+## Notes
+
+- **Target must be explicit.** The interactive drive picker is for terminals; a
+  scheduled run takes an already-mounted `--target`/`MYBTRFS_TARGET` path.
+- **Keep-all by default.** Without `--snapshot-preserve`/`--target-preserve`,
+  nothing is pruned — add them once you trust the backups.
+- **One lock for the host.** `--lock /run/mybtrfs.lock` serializes every scheduled
+  run; a second invocation while one is in flight exits 3 and changes nothing.

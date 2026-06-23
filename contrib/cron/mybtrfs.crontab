@@ -1,0 +1,11 @@
+# mybtrfs via cron — an alternative to the systemd timer (contrib/systemd/).
+# Install as /etc/cron.d/mybtrfs (note the required user field, `root`).
+#
+# btrfs needs root (mybtrfs exits 4 otherwise). The flags make it cron-safe:
+#   --yes      non-interactive (no prompts)
+#   --lock     refuse to overlap a still-running backup (exits 3)
+#   --journal  append a timestamped audit line per run
+# Add retention with e.g. --snapshot-preserve "48h 14d 8w" --target-preserve "14d 12w 12m".
+#
+# m h dom mon dow user  command
+  17 2 *   *   *   root  /usr/local/bin/mybtrfs run /home /home/.mybtrfs_snapshots home /mnt/backup/myhost --yes --lock /run/mybtrfs.lock --journal /var/log/mybtrfs.log
