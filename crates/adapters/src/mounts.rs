@@ -22,6 +22,11 @@ pub(crate) struct MountEntry {
     pub mountpoint: PathBuf,
     /// Filesystem type (e.g. `btrfs`).
     pub fstype: String,
+    /// The mounted subvolume's path from the filesystem root, from the `subvol=`
+    /// mount option (e.g. `/@pool`); `/` for a top-level (subvolid 5) mount. Used
+    /// to re-base `btrfs subvolume list` paths (which are fs-root-relative) to be
+    /// mountpoint-relative.
+    pub subvol: PathBuf,
 }
 
 /// Reads the kernel mount table (injectable so the adapter stays testable).
@@ -52,17 +57,30 @@ fn parse_mounts(content: &str) -> Result<Vec<MountEntry>, PortError> {
             continue;
         }
         let mut fields = line.split_whitespace();
-        let (_device, Some(mountpoint), Some(fstype)) =
-            (fields.next(), fields.next(), fields.next())
+        let (_device, Some(mountpoint), Some(fstype), options) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
         else {
             return Err(PortError::Parse(format!("malformed mount line: {line}")));
         };
         entries.push(MountEntry {
             mountpoint: PathBuf::from(unescape_octal(mountpoint)),
             fstype: fstype.to_owned(),
+            subvol: subvol_from_options(options),
         });
     }
     Ok(entries)
+}
+
+/// The mounted subvolume's path from the comma-separated mount options
+/// (`subvol=/@pool`), octal-unescaped. Defaults to `/` (top level) when no
+/// `subvol=` option is present.
+fn subvol_from_options(options: Option<&str>) -> PathBuf {
+    options
+        .and_then(|opts| opts.split(',').find_map(|opt| opt.strip_prefix("subvol=")))
+        .map_or_else(
+            || PathBuf::from("/"),
+            |raw| PathBuf::from(unescape_octal(raw)),
+        )
 }
 
 /// The btrfs mount whose mountpoint is the longest prefix of `path` — the
@@ -121,6 +139,18 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[1].mountpoint, PathBuf::from("/mnt/pool"));
         assert_eq!(entries[1].fstype, "btrfs");
+    }
+
+    #[test]
+    fn parses_the_mount_subvol_option() {
+        crate::init_test_logger();
+        let entries = parse_mounts(
+            "/dev/sdb1 /mnt/pool btrfs rw,relatime,subvolid=256,subvol=/@pool 0 0\n/dev/sdc1 /mnt/drive btrfs rw 0 0\n",
+        )
+        .unwrap();
+        assert_eq!(entries[0].subvol, PathBuf::from("/@pool"));
+        // No `subvol=` option → defaults to the top level.
+        assert_eq!(entries[1].subvol, PathBuf::from("/"));
     }
 
     #[test]

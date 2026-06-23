@@ -187,6 +187,22 @@ fn strip_fs_tree(raw: &str) -> PathBuf {
     PathBuf::from(raw.strip_prefix(FS_TREE_PREFIX).unwrap_or(raw))
 }
 
+/// Re-base an fs-root-relative `list` path (relative to the btrfs top level,
+/// subvolid 5) to be relative to the **mountpoint**, by stripping the mounted
+/// subvolume's path-from-fs-root (`subvol`, taken from the `subvol=` mount
+/// option). A top-level mount has `subvol = /`, so the path is returned
+/// unchanged; a path not under the mounted subvolume is also returned as-is (it
+/// simply won't match any directory under this mountpoint). This makes `list`
+/// paths consistent with `show` (mountpoint-relative), so that
+/// `mountpoint.join(path)` reconstructs the real on-disk path on any mount layout
+/// — not only a subvolid-5 mount.
+pub(crate) fn to_mountpoint_relative(fs_root_path: &Path, subvol: &Path) -> PathBuf {
+    let prefix = subvol.strip_prefix("/").unwrap_or(subvol);
+    fs_root_path
+        .strip_prefix(prefix)
+        .map_or_else(|_| fs_root_path.to_path_buf(), Path::to_path_buf)
+}
+
 /// Parse a btrfs UUID field. The `-` sentinel (and an absent field) map to
 /// `None`; a present-but-malformed value is a parse **error**, not silently
 /// dropped — btrbk rejects such subvolumes, and coercing a garbled
@@ -463,6 +479,27 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
         );
         assert!(snapshot.readonly); // present in the `-r` list → merged
         assert_eq!(snapshot.path, PathBuf::from("backups/@data.20260622T1900")); // `<FS_TREE>/` stripped
+    }
+
+    #[test]
+    fn to_mountpoint_relative_rebases_against_the_mount_subvol() {
+        crate::init_test_logger();
+        // Non-root mount `subvol=/@pool`: list yields fs-root-relative paths;
+        // rebasing strips the mounted subvolume prefix → mountpoint-relative.
+        assert_eq!(
+            to_mountpoint_relative(Path::new("@pool/snapshots/home.X"), Path::new("/@pool")),
+            PathBuf::from("snapshots/home.X")
+        );
+        // Top-level mount `subvol=/`: the path is unchanged.
+        assert_eq!(
+            to_mountpoint_relative(Path::new("snapshots/home.X"), Path::new("/")),
+            PathBuf::from("snapshots/home.X")
+        );
+        // A subvolume elsewhere in the filesystem is left as-is.
+        assert_eq!(
+            to_mountpoint_relative(Path::new("@other/x"), Path::new("/@pool")),
+            PathBuf::from("@other/x")
+        );
     }
 
     #[test]

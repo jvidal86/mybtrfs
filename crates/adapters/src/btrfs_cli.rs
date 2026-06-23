@@ -48,11 +48,12 @@ impl BtrfsCliAdapter {
     /// # Errors
     /// [`PortError`] if the mount table cannot be read, no btrfs filesystem
     /// contains `path`, or `btrfs filesystem show` fails / cannot be parsed.
-    fn resolve(&self, path: &Path) -> Result<(PathBuf, Uuid), PortError> {
+    fn resolve(&self, path: &Path) -> Result<(PathBuf, Uuid, PathBuf), PortError> {
         let entries = self.mounts.entries()?;
         let mount = mounts::containing_btrfs_mount(&entries, path)
             .ok_or_else(|| PortError::Command(format!("no btrfs filesystem contains {path:?}")))?;
         let mountpoint = mount.mountpoint.clone();
+        let subvol = mount.subvol.clone();
         let output = self.runner.run(
             BTRFS,
             &[
@@ -62,7 +63,7 @@ impl BtrfsCliAdapter {
             ],
         )?;
         let fs_uuid = parse::parse_filesystem_uuid(&output)?;
-        Ok((mountpoint, fs_uuid))
+        Ok((mountpoint, fs_uuid, subvol))
     }
 }
 
@@ -74,7 +75,9 @@ impl Default for BtrfsCliAdapter {
 
 impl SubvolumeRepository for BtrfsCliAdapter {
     fn show(&self, path: &Path) -> Result<Subvolume, PortError> {
-        let (mountpoint, fs_uuid) = self.resolve(path)?;
+        // `show` is given the real path, so its mountpoint-relative `relative_path`
+        // is already correct; the mount subvol is only needed to re-base `list`.
+        let (mountpoint, fs_uuid, _subvol) = self.resolve(path)?;
         let output = self.runner.run(
             BTRFS,
             &[
@@ -92,7 +95,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
     }
 
     fn list(&self, filesystem: &Path) -> Result<Vec<Subvolume>, PortError> {
-        let (mountpoint, fs_uuid) = self.resolve(filesystem)?;
+        let (mountpoint, fs_uuid, subvol) = self.resolve(filesystem)?;
         // Display flags match btrbk: -a (all) -c (cgen) -u (uuid) -q (parent_uuid)
         // -R (received_uuid). The read-only flag is only available via -r, so a
         // second call provides it and `parse_list` merges the two.
@@ -119,7 +122,15 @@ impl SubvolumeRepository for BtrfsCliAdapter {
                 filesystem.as_os_str(),
             ],
         )?;
-        parse::parse_list(&listing, &readonly, &fs_uuid, &mountpoint)
+        // `list` paths are fs-root-relative; re-base each to the mountpoint (using
+        // the mounted subvolume) so it agrees with `show` and `mountpoint.join(path)`
+        // reconstructs the real on-disk path on any mount layout (invariant: paths
+        // are mountpoint-relative everywhere).
+        let mut subvolumes = parse::parse_list(&listing, &readonly, &fs_uuid, &mountpoint)?;
+        for subvolume in &mut subvolumes {
+            subvolume.path = parse::to_mountpoint_relative(&subvolume.path, &subvol);
+        }
+        Ok(subvolumes)
     }
 }
 
@@ -396,10 +407,12 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
                 MountEntry {
                     mountpoint: PathBuf::from("/mnt/pool"),
                     fstype: "btrfs".to_owned(),
+                    subvol: PathBuf::from("/"),
                 },
                 MountEntry {
                     mountpoint: PathBuf::from("/mnt/drive"),
                     fstype: "btrfs".to_owned(),
+                    subvol: PathBuf::from("/"),
                 },
             ])
         }
@@ -513,6 +526,49 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
         assert_eq!(subs[1].id, 260);
         assert!(subs[1].readonly);
         assert_eq!(subs[1].fs_uuid, fs());
+    }
+
+    #[test]
+    fn list_rebases_paths_for_a_non_root_subvol_mount() {
+        crate::init_test_logger();
+        // A pool mounted at a non-top-level subvolume (`subvol=/@pool`): btrfs
+        // `list` reports fs-root-relative paths (under `@pool/`), which the adapter
+        // must re-base to mountpoint-relative so `mountpoint.join(path)` is correct.
+        struct SubvolMounts;
+        impl MountTable for SubvolMounts {
+            fn entries(&self) -> Result<Vec<MountEntry>, PortError> {
+                Ok(vec![MountEntry {
+                    mountpoint: PathBuf::from("/mnt/pool"),
+                    fstype: "btrfs".to_owned(),
+                    subvol: PathBuf::from("/@pool"),
+                }])
+            }
+        }
+        let list = "\
+ID 256 gen 120 cgen 95 top level 256 parent_uuid - received_uuid - uuid a1a1a1a1-1111-4111-8111-111111111111 path <FS_TREE>/@pool/@data
+ID 260 gen 130 cgen 130 top level 256 parent_uuid b2b2b2b2-2222-4222-8222-222222222222 received_uuid a1a1a1a1-1111-4111-8111-111111111111 uuid c3c3c3c3-3333-4333-8333-333333333333 path <FS_TREE>/@pool/backups/@data.20260622T1900
+";
+        let readonly =
+            "ID 260 gen 130 top level 256 path <FS_TREE>/@pool/backups/@data.20260622T1900\n";
+        let adapter = BtrfsCliAdapter::with_parts(
+            Box::new(FakeBtrfs {
+                list: list.to_owned(),
+                readonly: readonly.to_owned(),
+                ..FakeBtrfs::default()
+            }),
+            Box::new(SubvolMounts),
+        );
+        let subs = adapter.list(Path::new("/mnt/pool")).unwrap();
+        assert_eq!(subs.len(), 2);
+        // The `@pool/` mount-subvol prefix is stripped → mountpoint-relative,
+        // matching what `show` would stamp.
+        assert_eq!(subs[0].path, PathBuf::from("@data"));
+        assert_eq!(subs[1].path, PathBuf::from("backups/@data.20260622T1900"));
+        // So `mountpoint.join(path)` reconstructs the real on-disk path:
+        assert_eq!(
+            subs[1].mountpoint.join(&subs[1].path),
+            PathBuf::from("/mnt/pool/backups/@data.20260622T1900")
+        );
     }
 
     #[test]
