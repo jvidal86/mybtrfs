@@ -56,6 +56,10 @@ if [ -z "$MYBTRFS" ]; then
 fi
 [ -n "$MYBTRFS" ] && [ -x "$MYBTRFS" ] || die "mybtrfs not found — build it (cargo build --release) or set MYBTRFS=/path"
 info "mybtrfs:  $MYBTRFS"
+# Guard against a stale binary (a frequent foot-gun): warn if any source is newer.
+if [ -n "$(find "$REPO/crates" -name '*.rs' -newer "$MYBTRFS" -print -quit 2>/dev/null)" ]; then
+  echo "   WARNING: source is newer than this binary — rebuild first:  cargo build --release"
+fi
 
 # Give root ssh access to the target (mybtrfs's ssh runs as root under sudo).
 install -d -m700 /root/.ssh
@@ -132,9 +136,13 @@ info "phase 1 OK — $REMOTE_PATH/$name1 is readonly with a Received UUID"
 # ---- phase 2: a second backup + retention prunes the older one over ssh ----
 info "phase 2: a second backup with --target-preserve-min latest (prunes the first, remotely)"
 sleep 2
+set +e
 out2="$("$MYBTRFS" run "$MNT/$BASENAME" "$MNT/.snap" "$BASENAME" "$ENDPOINT" --yes --lock "$LOCK" \
         --incremental no --snapshot-preserve-min latest --target-preserve-min latest 2>&1)"
+rc2=$?
+set -e
 printf '%s\n' "$out2" | sed 's/^/   /'
+[ "$rc2" -eq 0 ] || die "phase 2 'mybtrfs run' exited $rc2 (see output above)"
 
 # The older backup ($name1) must be gone from the target, pruned over ssh.
 if remote_backups | grep -qxF "$name1"; then
