@@ -11,8 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use mybtrfs_adapters::{
-    AutoPrompter, BtrfsCliAdapter, FileJournal, FileLock, LocalFsAdapter, LsblkDriveDiscovery,
-    NullJournal, StdioPrompter, SystemClock,
+    AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, LocalFsAdapter,
+    LsblkDriveDiscovery, NullJournal, StdioPrompter, SystemClock, parse_endpoint,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
@@ -154,9 +154,9 @@ enum Command {
         snapshot_dir: PathBuf,
         /// Base name for the snapshot (a timestamp is appended).
         basename: String,
-        /// Target directory on the backup filesystem. If omitted, you are
-        /// prompted to pick a discovered btrfs drive and backups go to
-        /// `<drive-mountpoint>/<hostname>/`.
+        /// Target for the backup: a local directory, or a remote
+        /// `ssh://[user@]host[:port]/path` endpoint. If omitted, you are prompted
+        /// to pick a discovered btrfs drive (`<mountpoint>/<hostname>/`).
         target_dir: Option<PathBuf>,
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
@@ -390,27 +390,64 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let source = validate_path(source)?;
             ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
-            // Resolve the target: an explicit directory, or an interactively-picked
-            // drive with a per-host subdirectory (`<mountpoint>/<hostname>/`).
-            let target_dir = match target_dir {
-                Some(dir) => dir.clone(),
-                None => resolve_target_drive(&LsblkDriveDiscovery::new(), prompter.as_ref())?
-                    .join(hostname()),
-            };
-            ensure_dir(&localfs, prompter.as_ref(), &target_dir)?;
-            let target_dir = validate_path(&target_dir)?;
             let snapshot_policy = retention_args.snapshot_policy()?;
             let target_policy = retention_args.target_policy()?;
-            let report = backup_with((*incremental).into())
-                .run(
-                    &source,
-                    &snapshot_dir,
-                    basename,
-                    &target_dir,
-                    &snapshot_policy,
-                    &target_policy,
-                )
-                .context("backup run failed")?;
+            // Resolve the target: an explicit local dir, an `ssh://` remote
+            // endpoint, or (when omitted) an interactively-picked drive with a
+            // per-host subdirectory (`<mountpoint>/<hostname>/`).
+            let target = match target_dir {
+                Some(spec) => parse_target(spec)?,
+                None => Endpoint::Local(
+                    resolve_target_drive(&LsblkDriveDiscovery::new(), prompter.as_ref())?
+                        .join(hostname()),
+                ),
+            };
+            let incremental = (*incremental).into();
+            let report = match target {
+                Endpoint::Local(dir) => {
+                    ensure_dir(&localfs, prompter.as_ref(), &dir)?;
+                    let dir = validate_path(&dir)?;
+                    backup_with(incremental).run(
+                        &source,
+                        &snapshot_dir,
+                        basename,
+                        &dir,
+                        &snapshot_policy,
+                        &target_policy,
+                    )
+                }
+                Endpoint::Remote { ssh, path } => {
+                    // The target's queries / receive / delete run over ssh; remote
+                    // pruning isn't wired yet, so require the keep-all target floor.
+                    if retention_args.target_preserve_min != "all" {
+                        return Err(anyhow::Error::new(UsageError(
+                            "pruning a remote ssh:// target is not yet supported; keep the \
+                             default --target-preserve-min all"
+                                .to_owned(),
+                        )));
+                    }
+                    let ssh_btrfs = BtrfsCliAdapter::ssh_target(ssh);
+                    BackupService::with_incremental(
+                        &clock,
+                        &btrfs,     // source_repo (local)
+                        &ssh_btrfs, // target_repo (remote)
+                        &btrfs,     // snapshots (local)
+                        &ssh_btrfs, // transfer (local send | remote receive)
+                        &retention,
+                        TimestampFormat::Long,
+                        incremental,
+                    )
+                    .run(
+                        &source,
+                        &snapshot_dir,
+                        basename,
+                        &path,
+                        &snapshot_policy,
+                        &target_policy,
+                    )
+                }
+            }
+            .context("backup run failed")?;
             print_run_report(&report);
             Ok(())
         }
@@ -609,6 +646,18 @@ fn acquire_lock(override_path: Option<&Path>) -> Result<FileLock> {
 fn validate_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("invalid or missing path: {}", path.display()))
+}
+
+/// Parse a `run` target spec into an [`Endpoint`]: a local path, or an `ssh://`
+/// remote endpoint. A malformed `ssh://` spec is a usage error (exit 2).
+///
+/// # Errors
+/// [`UsageError`] if the path is not UTF-8 or the `ssh://` spec is malformed.
+fn parse_target(spec: &Path) -> Result<Endpoint> {
+    let text = spec
+        .to_str()
+        .with_context(|| format!("target path is not valid UTF-8: {}", spec.display()))?;
+    parse_endpoint(text).map_err(|err| anyhow::Error::new(UsageError(err.to_string())))
 }
 
 /// Resolve a backup-target drive interactively: enumerate mounted btrfs
@@ -1032,6 +1081,21 @@ mod tests {
     #[test]
     fn malformed_retention_spec_is_a_usage_error() {
         let err = parse_policy("all", "7x").unwrap_err();
+        assert_eq!(exit_code_for(&err), exit_code::USAGE);
+    }
+
+    #[test]
+    fn parse_target_routes_local_and_remote_and_rejects_bad_ssh() {
+        assert!(matches!(
+            parse_target(Path::new("/mnt/backup/host")).unwrap(),
+            Endpoint::Local(_)
+        ));
+        assert!(matches!(
+            parse_target(Path::new("ssh://isard@apolo/mnt/btrfs-test")).unwrap(),
+            Endpoint::Remote { .. }
+        ));
+        // A malformed ssh:// spec (no path) is a usage error → exit 2.
+        let err = parse_target(Path::new("ssh://apolo")).unwrap_err();
         assert_eq!(exit_code_for(&err), exit_code::USAGE);
     }
 

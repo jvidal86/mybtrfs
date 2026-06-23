@@ -65,9 +65,18 @@ preserved — `ssh host --` then the btrfs argv as separate arguments.
 key can run only btrfs send/receive (see `../btrbk/btrbk/doc/` and
 `contrib/`). Document, do not auto-configure.
 
-**Unit-testable now:** the argv/pipe construction (`ssh … -- btrfs send -p …`).
-**Needs real infra to validate:** an actual SSH host with btrfs — a second VM/CI
-service; out of sandbox.
+**Status: IMPLEMENTED (backup to a remote target).** `crates/adapters/src/ssh.rs`
+(`SshEndpoint`/`parse_endpoint` + `SshCommandRunner` + `SshMountTable`) and
+`BtrfsCliAdapter::ssh_target`; the CLI accepts `mybtrfs run … ssh://[user@]host[:port]/path`
+(`crates/cli/src/cli.rs`). 13 unit tests, and the pattern was **validated live**
+against a real host: a btrfs stream piped into `ssh host -- sudo btrfs receive`
+produced a readonly subvolume with a `received_uuid` (#1), and remote
+`btrfs subvolume show` returns the verification fields.
+**Still open:** remote *pruning* of the target (the single-deleter prune path needs
+a per-endpoint deleter), so a remote target currently requires the keep-all floor
+(`--target-preserve-min all`); and *restore from* a remote source (the reverse
+pipe). A full `mybtrfs run` end-to-end over ssh validates on a host with a btrfs
+source (the sandbox has neither root nor btrfs).
 
 ---
 
