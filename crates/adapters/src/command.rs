@@ -43,12 +43,15 @@ pub(crate) struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+        log::debug!("running: {program} {args:?}");
         let output = Command::new(program).args(args).output()?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::debug!("command failed ({}): {}", output.status, stderr.trim());
             return Err(PortError::Command(format!(
                 "`{program}` exited unsuccessfully ({}): {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr.trim()
             )));
         }
         String::from_utf8(output.stdout).map_err(|err| {
@@ -65,6 +68,7 @@ impl CommandRunner for SystemCommandRunner {
         // consumer's stdin. Ordering matters (04 §8): the consumer drains the data
         // pipe, so we wait on it first; the producer's stderr is drained on a thread
         // so a chatty producer can never deadlock by filling an undrained pipe.
+        log::debug!("piping: {} | {}", producer.0, consumer.0);
         let mut producer_child = Command::new(producer.0)
             .args(producer.1)
             .stdout(Stdio::piped())

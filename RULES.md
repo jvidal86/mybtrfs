@@ -60,3 +60,18 @@ in `CLAUDE.md` § "Invariants any implementation MUST preserve" and `02` §6.
 20. Builds on the pinned **MSRV** (`rust-version` in `[workspace.package]`); bump it
     deliberately, never incidentally.
 21. **TDD:** the increment started with a failing test (red → green → refactor).
+
+## Logging
+
+22. **`log` crate only in `application` and `adapters`** — never in `domain` (breaks
+    purity). The CLI composition root wires `env_logger` once (with `RUST_LOG` and
+    default `info`); no other crate may initialize a subscriber.
+23. **Level convention**: `error` — invariant violated / operation cannot continue;
+    `warn` — surprising but recoverable (garbled receive, path skipped, force-preserve
+    triggered); `info` — each major step (snapshot created, transfer started/completed,
+    subvolume deleted); `debug` — commands spawned, decisions made within a step;
+    `trace` — per-item loops, path filtering, regex matching.
+24. **Every adapter method that spawns a btrfs command** must emit at least one
+    `log::debug!` before the spawn. Every `PortError::Verification` / `PortError::Command`
+    returned from an adapter must have a corresponding `log::error!` or `log::warn!`
+    at the detection site — never let a failure propagate silently.

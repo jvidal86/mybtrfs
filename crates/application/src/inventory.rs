@@ -81,8 +81,10 @@ impl<'a> InventoryService<'a> {
     pub fn list(&self, snapshot_dir: &Path, target_dir: &Path) -> Result<Inventory, PortError> {
         let snapshots = managed_in(self.source_repo, snapshot_dir)?;
         let backups = managed_in(self.target_repo, target_dir)?;
-        let graph = RelationshipGraph::build(backups.clone())
-            .map_err(|err| PortError::Verification(err.to_string()))?;
+        let graph = RelationshipGraph::build(backups.clone()).map_err(|err| {
+            log::error!("duplicate uuid detected: {err} — cloned disk guard triggered");
+            PortError::Verification(err.to_string())
+        })?;
 
         let mut correlated_ids: HashSet<u64> = HashSet::new();
         let snapshot_statuses: Vec<BackupStatus> = snapshots
@@ -141,8 +143,9 @@ impl<'a> InventoryService<'a> {
 /// The mybtrfs-named subvolumes directly in `dir` (via `repo`): filtered to those
 /// whose parent directory is `dir` and whose leaf name matches the scheme.
 fn managed_in(repo: &dyn SubvolumeRepository, dir: &Path) -> Result<Vec<Subvolume>, PortError> {
-    Ok(repo
-        .list(dir)?
+    let all = repo.list(dir)?;
+    let total = all.len();
+    let managed: Vec<Subvolume> = all
         .into_iter()
         .filter(|sv| sv.mountpoint.join(&sv.path).parent() == Some(dir))
         .filter(|sv| {
@@ -152,7 +155,15 @@ fn managed_in(repo: &dyn SubvolumeRepository, dir: &Path) -> Result<Vec<Subvolum
                 .and_then(parse_name)
                 .is_some()
         })
-        .collect())
+        .collect();
+    let filtered = total.saturating_sub(managed.len());
+    if filtered > 0 {
+        log::trace!(
+            "managed_in({}): filtered {filtered} foreign-named subvolume(s)",
+            dir.display()
+        );
+    }
+    Ok(managed)
 }
 
 #[cfg(test)]

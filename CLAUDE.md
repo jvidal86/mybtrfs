@@ -134,6 +134,21 @@ Non-obvious correctness rules carried from btrbk (details + citations in the doc
   timestamped names with `_N` collision counter; leave non-matching names
   untouched; reject duplicate `uuid` (cloned-disk guard).
 
+## Logging
+
+Diagnostic logging uses the `log` facade in `application` and `adapters` only
+(`domain` stays log-free to preserve purity). The CLI composition root initializes
+`env_logger` from `RUST_LOG` (default `info`). Level convention:
+- `error` — invariant violated, operation cannot continue
+- `warn` — garbled receive detected, path skipped, safety anchor triggered
+- `info` — each major step (snapshot, transfer, prune, delete, restore)
+- `debug` — btrfs commands spawned, name collision resolution, decisions within a step
+- `trace` — per-item iteration, path filtering
+
+Every adapter method spawning a btrfs command must emit `log::debug!` before the
+spawn. Every `PortError::Verification` returned must have a `log::error!` at the
+detection site. Capture the full trace with `RUST_LOG=debug mybtrfs … 2>debug.log`.
+
 ## Intentional divergences from btrbk
 
 Additions/improvements, not oversights: **CLI-first with interactive drive

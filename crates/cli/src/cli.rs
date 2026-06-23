@@ -13,9 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
-use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
-};
+use mybtrfs_application::ports::{DiscoveredFilesystem, DriveDiscoveryPort};
 use mybtrfs_application::restore::RestoreService;
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_domain::naming::TimestampFormat;
@@ -79,8 +77,18 @@ enum Command {
         #[command(flatten)]
         retention: RetentionArgs,
     },
-    /// Prune snapshots/backups per retention policy (Phase 3).
-    Prune,
+    /// Prune snapshots/backups per retention policy (no snapshot, no transfer).
+    Prune {
+        /// Directory holding the source-side snapshots.
+        snapshot_dir: PathBuf,
+        /// Target directory on the backup filesystem.
+        target_dir: PathBuf,
+        /// Show what would be deleted without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        retention: RetentionArgs,
+    },
     /// Restore a backup to a writable subvolume at `dest` (Phase 4).
     Restore {
         /// The backup: a read-only subvolume on the destination filesystem.
@@ -171,6 +179,7 @@ fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
 /// Parse the command line and run; the returned exit code reflects success.
 #[must_use]
 pub fn run() -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
     match dispatch(&cli.command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -186,9 +195,7 @@ fn dispatch(command: &Command) -> Result<()> {
     let clock = SystemClock;
     let btrfs = BtrfsCliAdapter::new();
     let localfs = LocalFsAdapter::new();
-    // Deletions are logged at the composition root (decision ID-1).
-    let deleter = LoggingDeletePort { inner: &btrfs };
-    let retention = RetentionService::new(&clock, &deleter);
+    let retention = RetentionService::new(&clock, &btrfs);
     // One resolve-per-path adapter serves as both source and target repository
     // (it resolves each path's filesystem), plus the snapshot and transfer ports.
     // The incremental mode is per-command, so build the service where it's used.
@@ -326,10 +333,56 @@ fn dispatch(command: &Command) -> Result<()> {
             print_resume_report(&report);
             Ok(())
         }
-        Command::Prune => {
-            bail!("this command is not implemented yet")
+        Command::Prune {
+            snapshot_dir,
+            target_dir,
+            dry_run,
+            retention: retention_args,
+        } => {
+            let snapshot_dir = validate_path(snapshot_dir)?;
+            let target_dir = validate_path(target_dir)?;
+            let snapshot_policy = retention_args.snapshot_policy()?;
+            let target_policy = retention_args.target_policy()?;
+            // On a dry run, swap in a delete port that only reports (no deletion).
+            // The returned schedule still lists what *would* be deleted.
+            let report = if *dry_run {
+                let deleter = DryRunDeletePort;
+                let retention = RetentionService::new(&clock, &deleter);
+                prune_with(&clock, &btrfs, &retention, &snapshot_dir, &target_dir, &snapshot_policy, &target_policy)
+            } else {
+                prune_with(&clock, &btrfs, &retention, &snapshot_dir, &target_dir, &snapshot_policy, &target_policy)
+            }
+            .context("prune failed")?;
+            print_prune_report(&report, *dry_run);
+            Ok(())
         }
     }
+}
+
+/// Build a `BackupService` over the given retention service and run a standalone
+/// prune. Factored out so the dry-run and committing paths share one call site
+/// while each supplies its own delete port (via `retention`).
+fn prune_with(
+    clock: &SystemClock,
+    btrfs: &BtrfsCliAdapter,
+    retention: &RetentionService<'_>,
+    snapshot_dir: &Path,
+    target_dir: &Path,
+    snapshot_policy: &RetentionPolicy,
+    target_policy: &RetentionPolicy,
+) -> Result<PruneReport, PortError> {
+    // Incremental mode is irrelevant to prune (it never transfers).
+    BackupService::with_incremental(
+        clock,
+        btrfs,
+        btrfs,
+        btrfs,
+        btrfs,
+        retention,
+        TimestampFormat::Long,
+        Incremental::Yes,
+    )
+    .prune(snapshot_dir, target_dir, snapshot_policy, target_policy)
 }
 
 /// Canonicalize and validate a path before handing it to the use cases
@@ -388,6 +441,18 @@ fn print_resume_report(report: &ResumeReport) {
     }
     println!(
         "pruned {} snapshot(s), {} backup(s)",
+        report.snapshots_pruned.delete.len(),
+        report.backups_pruned.delete.len()
+    );
+}
+
+/// Print a one-fact-per-line summary of a standalone prune. On a dry run the
+/// counts describe what *would* be deleted (the per-path lines came from the
+/// dry-run delete port).
+fn print_prune_report(report: &PruneReport, dry_run: bool) {
+    let verb = if dry_run { "would prune" } else { "pruned" };
+    println!(
+        "{verb} {} snapshot(s), {} backup(s)",
         report.snapshots_pruned.delete.len(),
         report.backups_pruned.delete.len()
     );
@@ -458,19 +523,6 @@ fn print_drives(drives: &[DiscoveredFilesystem]) {
             drive.device.display(),
             drive.fs_uuid
         );
-    }
-}
-
-/// Wraps a [`DeletePort`] to log each deletion (observability lives at the
-/// composition root — decision ID-1).
-struct LoggingDeletePort<'a> {
-    inner: &'a dyn DeletePort,
-}
-
-impl DeletePort for LoggingDeletePort<'_> {
-    fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
-        println!("deleting: {}", path.display());
-        self.inner.delete(path, commit)
     }
 }
 

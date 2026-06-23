@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 mybtrfs-domain.workspace = true
 mybtrfs-application.workspace = true
+log.workspace = true
 regex.workspace = true
 chrono.workspace = true
 serde.workspace = true

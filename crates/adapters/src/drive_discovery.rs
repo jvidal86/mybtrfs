@@ -43,6 +43,7 @@ impl Default for LsblkDriveDiscovery {
 
 impl DriveDiscoveryPort for LsblkDriveDiscovery {
     fn detect(&self) -> Result<Vec<DiscoveredFilesystem>, PortError> {
+        log::debug!("running lsblk to discover btrfs filesystems");
         let json = self.runner.run(
             LSBLK,
             &[
@@ -51,7 +52,9 @@ impl DriveDiscoveryPort for LsblkDriveDiscovery {
                 OsStr::new("PATH,FSTYPE,MOUNTPOINT,LABEL,UUID,RM"),
             ],
         )?;
-        parse_lsblk(&json)
+        let found = parse_lsblk(&json)?;
+        log::debug!("discovered {} btrfs filesystem(s)", found.len());
+        Ok(found)
     }
 }
 

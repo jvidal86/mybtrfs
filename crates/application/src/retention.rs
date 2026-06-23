@@ -44,6 +44,7 @@ impl<'a> RetentionService<'a> {
         ctx: &SafetyContext,
         commit: DeleteCommit,
     ) -> Result<Schedule<Subvolume>, PortError> {
+        log::debug!("prune: {} candidates, policy={policy:?}", candidates.len());
         let now = self.clock.now();
         let reference = *now.offset();
 
@@ -54,6 +55,11 @@ impl<'a> RetentionService<'a> {
 
         let scheduled = schedule(entries, policy, now.naive_local());
         let safe = enforce(scheduled, ctx);
+        log::debug!(
+            "prune: preserving {} entries, deleting {}",
+            safe.preserve.len(),
+            safe.delete.len()
+        );
 
         for subvol in &safe.delete {
             let path = subvol.mountpoint.join(&subvol.path);
@@ -69,7 +75,10 @@ impl<'a> RetentionService<'a> {
 /// resolved against the `reference` timezone.
 fn dated_entry(subvol: &Subvolume, reference: FixedOffset) -> Option<DatedEntry<Subvolume>> {
     let leaf = subvol.path.file_name()?.to_str()?;
-    let parsed = parse_name(leaf)?;
+    let Some(parsed) = parse_name(leaf) else {
+        log::trace!("skipping foreign-named subvolume: {leaf}");
+        return None;
+    };
 
     let (instant, local) = match parsed.offset {
         Some(offset) => {

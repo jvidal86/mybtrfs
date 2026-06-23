@@ -74,11 +74,25 @@ impl<'a> RestoreService<'a> {
         dest: &Path,
         force: bool,
     ) -> Result<RestoreReport, RestoreError> {
+        log::info!(
+            "restore: {} → {} (force={force})",
+            backup.display(),
+            dest.display()
+        );
         let moved_aside = if self.fs.exists(dest)? {
             if !force {
+                log::warn!(
+                    "restore: destination exists, refusing without --force: {}",
+                    dest.display()
+                );
                 return Err(RestoreError::DestinationExists(dest.to_path_buf()));
             }
             let broken = broken_path(dest);
+            log::info!(
+                "restore: moving aside {} → {}",
+                dest.display(),
+                broken.display()
+            );
             self.fs.rename(dest, &broken)?;
             Some(broken)
         } else {
@@ -87,9 +101,13 @@ impl<'a> RestoreService<'a> {
 
         let restored = self.snapshots.make_writable(backup, dest)?;
         if restored.readonly || restored.received_uuid.is_some() {
+            log::error!(
+                "restore: result is not a clean writable subvolume — invariant #7 violated"
+            );
             return Err(RestoreError::NotCleanWritable);
         }
 
+        log::info!("restore: complete: {}", dest.display());
         Ok(RestoreReport {
             restored,
             moved_aside,

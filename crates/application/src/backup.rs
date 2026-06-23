@@ -46,6 +46,16 @@ pub struct ResumeReport {
     pub backups_pruned: Schedule<Subvolume>,
 }
 
+/// The outcome of a standalone `prune` (no snapshot, no transfer): the
+/// preserve/delete partitions for the snapshot set and the backup set.
+#[derive(Debug)]
+pub struct PruneReport {
+    /// Snapshot-side retention result (over `snapshot_dir`).
+    pub snapshots_pruned: Schedule<Subvolume>,
+    /// Backup-side retention result (over `target_dir`).
+    pub backups_pruned: Schedule<Subvolume>,
+}
+
 /// Orchestrates the backup operations over the driven ports: `snapshot`, `run`
 /// (snapshot → send/receive → prune), and `resume`, delegating retention to
 /// [`RetentionService`]. `run`/`resume` send incrementally (`send -p`, plus any
@@ -145,7 +155,12 @@ impl<'a> BackupService<'a> {
             .filter_map(|sv| sv.path.file_name().and_then(OsStr::to_str))
             .collect();
 
-        let dest = snapshot_dir.join(next_free_name(&base, &leaves));
+        let free_name = next_free_name(&base, &leaves);
+        if free_name != base {
+            log::debug!("name collision for {base}, using {free_name}");
+        }
+        let dest = snapshot_dir.join(&free_name);
+        log::info!("snapshot: {} → {}", source.display(), dest.display());
         self.snapshots.create_readonly(source, &dest)
     }
 
@@ -172,7 +187,12 @@ impl<'a> BackupService<'a> {
         snapshot_policy: &RetentionPolicy,
         target_policy: &RetentionPolicy,
     ) -> Result<RunReport, PortError> {
+        log::info!("run: {} → {}", source.display(), target_dir.display());
         let snapshot = self.snapshot(source, snapshot_dir, basename)?;
+        log::info!(
+            "run: snapshot created: {}",
+            snapshot.mountpoint.join(&snapshot.path).display()
+        );
 
         // Source snapshots (incl. the new one) and the backups already on target —
         // each read from its own filesystem's repository — drive parent resolution.
@@ -183,6 +203,10 @@ impl<'a> BackupService<'a> {
         let backup = self
             .transfer
             .send_receive(&snapshot, &selection, target_dir)?;
+        log::info!(
+            "run: backup received: {}",
+            backup.mountpoint.join(&backup.path).display()
+        );
         if !backups.iter().any(|b| b.id == backup.id) {
             backups.push(backup.clone());
         }
@@ -244,6 +268,11 @@ impl<'a> BackupService<'a> {
         let mut backup_preserve = HashSet::new();
         let transferred = match &due {
             Some(snapshot) => {
+                log::info!(
+                    "resume: sending {} → {}",
+                    snapshot.mountpoint.join(&snapshot.path).display(),
+                    target_dir.display()
+                );
                 let selection = self.choose_parent(snapshot, &snapshots, &backups)?;
                 let backup = self
                     .transfer
@@ -254,7 +283,10 @@ impl<'a> BackupService<'a> {
                 }
                 Some(backup)
             }
-            None => None,
+            None => {
+                log::info!("resume: already up-to-date, nothing to transfer");
+                None
+            }
         };
 
         let (snapshots_pruned, backups_pruned) = self.prune_both(
@@ -268,6 +300,41 @@ impl<'a> BackupService<'a> {
 
         Ok(ResumeReport {
             transferred,
+            snapshots_pruned,
+            backups_pruned,
+        })
+    }
+
+    /// Standalone prune: apply retention to the snapshots in `snapshot_dir`
+    /// (`snapshot_policy`) and the backups in `target_dir` (`target_policy`)
+    /// without creating a snapshot or transferring anything. Nothing is
+    /// just-created, but `prune_both` still force-preserves the latest common
+    /// snapshot/backup pair (invariant #1) so a later incremental keeps a parent
+    /// on both ends. Backups are pruned before snapshots; a delete error aborts
+    /// fail-fast (decision ID-1). Returns a [`PruneReport`].
+    ///
+    /// # Errors
+    /// Propagates any [`PortError`] from the repositories or the delete port; or
+    /// [`PortError::Verification`] if the target backups carry a duplicate uuid
+    /// (the cloned-disk guard, invariant #10).
+    pub fn prune(
+        &self,
+        snapshot_dir: &Path,
+        target_dir: &Path,
+        snapshot_policy: &RetentionPolicy,
+        target_policy: &RetentionPolicy,
+    ) -> Result<PruneReport, PortError> {
+        let snapshots = existing_in(self.source_repo, snapshot_dir)?;
+        let backups = existing_in(self.target_repo, target_dir)?;
+        let (snapshots_pruned, backups_pruned) = self.prune_both(
+            &snapshots,
+            &backups,
+            snapshot_policy,
+            target_policy,
+            HashSet::new(),
+            HashSet::new(),
+        )?;
+        Ok(PruneReport {
             snapshots_pruned,
             backups_pruned,
         })
@@ -287,8 +354,10 @@ impl<'a> BackupService<'a> {
         mut snapshot_preserve: HashSet<u64>,
         mut backup_preserve: HashSet<u64>,
     ) -> Result<(Schedule<Subvolume>, Schedule<Subvolume>), PortError> {
-        let target_graph = RelationshipGraph::build(backups.to_vec())
-            .map_err(|err| PortError::Verification(err.to_string()))?;
+        let target_graph = RelationshipGraph::build(backups.to_vec()).map_err(|err| {
+            log::error!("duplicate uuid detected in backups: {err}");
+            PortError::Verification(err.to_string())
+        })?;
         if let Some(pair) = latest_common_pair(snapshots, &target_graph) {
             snapshot_preserve.insert(pair.snapshot.id);
             backup_preserve.extend(pair.backups.iter().map(|b| b.id));
@@ -1072,5 +1141,149 @@ mod tests {
         let calls = transfer.calls();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].1.parent.is_none());
+    }
+
+    #[test]
+    fn prune_deletes_by_policy_without_creating_or_transferring() {
+        let clock = FixedClock::at("2024-06-01T00:00:00+00:00");
+        // One orphan snapshot and one orphan backup (uncorrelated), valid names.
+        let source_repo = FakeRepo {
+            subvols: vec![ro(
+                5,
+                uuid_hex(5),
+                None,
+                "/mnt/pool",
+                ".mybtrfs_snapshots/home.20240101T1000",
+            )],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![ro(
+                22,
+                uuid_hex(22),
+                Some(uuid_hex(0xff)),
+                "/mnt/drive",
+                "host/home.20240101T1000",
+            )],
+        };
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::new(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+        );
+
+        let aggressive = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            ..Default::default()
+        };
+        let report = service
+            .prune(
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                Path::new("/mnt/drive/host"),
+                &aggressive,
+                &aggressive,
+            )
+            .expect("prune succeeds");
+
+        // A standalone prune neither snapshots nor transfers.
+        assert!(snapshots.readonly_calls().is_empty(), "prune creates nothing");
+        assert!(transfer.calls().is_empty(), "prune transfers nothing");
+        // Both uncorrelated orphans are deleted under the aggressive policy.
+        let snap_delete: Vec<u64> = report
+            .snapshots_pruned
+            .delete
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        let backup_delete: Vec<u64> = report.backups_pruned.delete.iter().map(|s| s.id).collect();
+        assert_eq!(snap_delete, vec![5]);
+        assert_eq!(backup_delete, vec![22]);
+    }
+
+    #[test]
+    fn prune_force_preserves_the_latest_common_pair() {
+        let clock = FixedClock::at("2024-06-01T00:00:00+00:00");
+        // A correlated pair (S1 <-> B11) plus an uncorrelated orphan on each side.
+        let source_repo = FakeRepo {
+            subvols: vec![
+                ro(
+                    1,
+                    uuid_hex(1),
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240102T1200",
+                ),
+                ro(
+                    5,
+                    uuid_hex(5),
+                    None,
+                    "/mnt/pool",
+                    ".mybtrfs_snapshots/home.20240101T1000",
+                ),
+            ],
+        };
+        let target_repo = FakeRepo {
+            subvols: vec![
+                ro(
+                    11,
+                    uuid_hex(11),
+                    Some(uuid_hex(1)), // correlated to S1
+                    "/mnt/drive",
+                    "host/home.20240102T1200",
+                ),
+                ro(
+                    22,
+                    uuid_hex(22),
+                    Some(uuid_hex(0xff)), // orphan
+                    "/mnt/drive",
+                    "host/home.20240101T1000",
+                ),
+            ],
+        };
+        let snapshots = RecordingSnapshot::default();
+        let transfer = RecordingTransfer::default();
+        let deleter = RecordingDeleter::default();
+        let retention = RetentionService::new(&clock, &deleter);
+        let service = BackupService::new(
+            &clock,
+            &source_repo,
+            &target_repo,
+            &snapshots,
+            &transfer,
+            &retention,
+            TimestampFormat::Long,
+        );
+
+        // PreserveMin::None with no tiers: the raw schedule would delete everything.
+        let aggressive = RetentionPolicy {
+            preserve_min: PreserveMin::None,
+            ..Default::default()
+        };
+        let report = service
+            .prune(
+                Path::new("/mnt/pool/.mybtrfs_snapshots"),
+                Path::new("/mnt/drive/host"),
+                &aggressive,
+                &aggressive,
+            )
+            .expect("prune succeeds");
+
+        // The latest common pair (S1 / B11) is force-preserved (invariant #1), so
+        // the next incremental still has a parent on both ends — even though the
+        // policy alone would have deleted it.
+        assert!(report.snapshots_pruned.preserve.iter().any(|s| s.id == 1));
+        assert!(report.backups_pruned.preserve.iter().any(|b| b.id == 11));
+        assert!(!report.snapshots_pruned.delete.iter().any(|s| s.id == 1));
+        assert!(!report.backups_pruned.delete.iter().any(|b| b.id == 11));
+        // The uncorrelated orphans are still pruned.
+        assert!(report.snapshots_pruned.delete.iter().any(|s| s.id == 5));
+        assert!(report.backups_pruned.delete.iter().any(|b| b.id == 22));
     }
 }
