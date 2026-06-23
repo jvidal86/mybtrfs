@@ -17,6 +17,7 @@ use mybtrfs_domain::parent::ParentSelection;
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::mounts::{self, MountTable, ProcMounts};
+use crate::ssh::{SshCommandRunner, SshEndpoint, SshMountTable};
 
 /// External program name (spawned as an argv array, never via a shell).
 const BTRFS: &str = "btrfs";
@@ -39,6 +40,22 @@ impl BtrfsCliAdapter {
         Self {
             runner: Box::new(SystemCommandRunner),
             mounts: Box::new(ProcMounts),
+        }
+    }
+
+    /// Create an adapter whose every btrfs operation runs on a remote host over
+    /// SSH (`ssh … -- sudo btrfs …`), resolving paths from the remote host's
+    /// `/proc/self/mounts`. A transfer's `btrfs send` stays local; only the
+    /// receive is remote. Serves the repository / transfer / delete ports for a
+    /// remote backup **target** (Phase 5 §2). See `documentation/08-phase5-design.md`.
+    #[must_use]
+    pub fn ssh_target(endpoint: SshEndpoint) -> Self {
+        Self {
+            runner: Box::new(SshCommandRunner::new(
+                Box::new(SystemCommandRunner),
+                endpoint.clone(),
+            )),
+            mounts: Box::new(SshMountTable::new(Box::new(SystemCommandRunner), endpoint)),
         }
     }
 

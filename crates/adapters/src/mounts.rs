@@ -50,7 +50,7 @@ impl MountTable for ProcMounts {
 
 /// Parse mount-table content (`device mountpoint fstype …` per line, with the
 /// kernel's octal-escaped whitespace in the path fields).
-fn parse_mounts(content: &str) -> Result<Vec<MountEntry>, PortError> {
+pub(crate) fn parse_mounts(content: &str) -> Result<Vec<MountEntry>, PortError> {
     let mut entries = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {

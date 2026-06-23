@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 use mybtrfs_application::ports::PortError;
 
+use crate::command::CommandRunner;
+use crate::mounts::{MountEntry, MountTable, parse_mounts};
+
 /// The scheme that marks a remote endpoint.
 const SSH_SCHEME: &str = "ssh://";
 
@@ -125,13 +128,119 @@ pub fn parse_endpoint(spec: &str) -> Result<Endpoint, PortError> {
     })
 }
 
+/// Build the `&[&OsStr]` borrow of an owned `argv` for [`CommandRunner`].
+fn arg_refs(argv: &[OsString]) -> Vec<&OsStr> {
+    argv.iter().map(OsString::as_os_str).collect()
+}
+
+/// A [`CommandRunner`] that runs each btrfs command on a remote host over SSH
+/// (`ssh host -- sudo btrfs …`) by delegating to a **local** runner — the `ssh`
+/// process is itself local, so no new execution machinery is needed. For a
+/// transfer it keeps the producer (`btrfs send`) local and wraps only the consumer
+/// (`btrfs receive`) in ssh, since a backup's source is local and only its target
+/// is remote. This lets the whole `BtrfsCliAdapter` serve a remote target unchanged.
+pub(crate) struct SshCommandRunner {
+    inner: Box<dyn CommandRunner>,
+    endpoint: SshEndpoint,
+}
+
+impl SshCommandRunner {
+    /// Wrap `inner` (a local runner) so btrfs commands run on `endpoint`.
+    pub(crate) fn new(inner: Box<dyn CommandRunner>, endpoint: SshEndpoint) -> Self {
+        Self { inner, endpoint }
+    }
+}
+
+impl CommandRunner for SshCommandRunner {
+    fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+        let (ssh_program, ssh_args) = self.endpoint.command(true, program, args);
+        self.inner.run(ssh_program, &arg_refs(&ssh_args))
+    }
+
+    fn pipe(
+        &self,
+        producer: (&str, &[&OsStr]),
+        consumer: (&str, &[&OsStr]),
+    ) -> Result<(), PortError> {
+        // The producer (`btrfs send`) stays local; only the consumer (`btrfs
+        // receive`) runs on the remote target.
+        let (consumer_program, consumer_args) = consumer;
+        let (ssh_program, ssh_args) = self.endpoint.command(true, consumer_program, consumer_args);
+        self.inner
+            .pipe(producer, (ssh_program, &arg_refs(&ssh_args)))
+    }
+}
+
+/// A [`MountTable`] that reads the **remote** host's `/proc/self/mounts` over SSH
+/// (no sudo — it is world-readable), so `BtrfsCliAdapter` resolves a remote-target
+/// path to its filesystem exactly as it does locally.
+pub(crate) struct SshMountTable {
+    inner: Box<dyn CommandRunner>,
+    endpoint: SshEndpoint,
+}
+
+impl SshMountTable {
+    /// Wrap `inner` (a local runner) so the mount table is read from `endpoint`.
+    pub(crate) fn new(inner: Box<dyn CommandRunner>, endpoint: SshEndpoint) -> Self {
+        Self { inner, endpoint }
+    }
+}
+
+impl MountTable for SshMountTable {
+    fn entries(&self) -> Result<Vec<MountEntry>, PortError> {
+        let (ssh_program, ssh_args) =
+            self.endpoint
+                .command(false, "cat", &[OsStr::new("/proc/self/mounts")]);
+        let content = self.inner.run(ssh_program, &arg_refs(&ssh_args))?;
+        parse_mounts(&content)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn osargs(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    /// A shared log of `(program, args)` each call was asked to run.
+    type CallLog = Rc<RefCell<Vec<(String, Vec<String>)>>>;
+
+    /// Records each call into a shared [`CallLog`], so a wrapping runner's argv
+    /// transformation can be asserted.
+    struct RecordingRunner {
+        log: CallLog,
+        stdout: String,
+    }
+    fn strs(args: &[&OsStr]) -> Vec<String> {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, program: &str, args: &[&OsStr]) -> Result<String, PortError> {
+            self.log.borrow_mut().push((program.to_owned(), strs(args)));
+            Ok(self.stdout.clone())
+        }
+        fn pipe(
+            &self,
+            producer: (&str, &[&OsStr]),
+            consumer: (&str, &[&OsStr]),
+        ) -> Result<(), PortError> {
+            self.log
+                .borrow_mut()
+                .push((format!("PIPE {}|{}", producer.0, consumer.0), {
+                    let mut v = strs(producer.1);
+                    v.push("|".to_owned());
+                    v.extend(strs(consumer.1));
+                    v
+                }));
+            Ok(())
+        }
     }
 
     #[test]
@@ -239,5 +348,137 @@ mod tests {
                 "show",
             ])
         );
+    }
+
+    /// `Vec<String>` form of an expected recorded argv.
+    fn ss(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn apolo() -> SshEndpoint {
+        SshEndpoint {
+            user: None,
+            host: "apolo".to_owned(),
+            port: None,
+        }
+    }
+
+    #[test]
+    fn ssh_runner_wraps_each_btrfs_command_in_ssh_sudo() {
+        crate::init_test_logger();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runner = SshCommandRunner::new(
+            Box::new(RecordingRunner {
+                log: Rc::clone(&log),
+                stdout: String::new(),
+            }),
+            apolo(),
+        );
+        runner
+            .run(
+                "btrfs",
+                &[
+                    OsStr::new("subvolume"),
+                    OsStr::new("delete"),
+                    OsStr::new("/mnt/btrfs-test/x"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            log.borrow()[0],
+            (
+                "ssh".to_owned(),
+                ss(&[
+                    "-o",
+                    "BatchMode=yes",
+                    "apolo",
+                    "--",
+                    "sudo",
+                    "btrfs",
+                    "subvolume",
+                    "delete",
+                    "/mnt/btrfs-test/x",
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_runner_keeps_the_send_local_and_only_wraps_the_receive() {
+        crate::init_test_logger();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let runner = SshCommandRunner::new(
+            Box::new(RecordingRunner {
+                log: Rc::clone(&log),
+                stdout: String::new(),
+            }),
+            SshEndpoint {
+                user: Some("isard".to_owned()),
+                host: "apolo".to_owned(),
+                port: None,
+            },
+        );
+        runner
+            .pipe(
+                ("btrfs", &[OsStr::new("send"), OsStr::new("/pool/snap")]),
+                (
+                    "btrfs",
+                    &[OsStr::new("receive"), OsStr::new("/mnt/btrfs-test")],
+                ),
+            )
+            .unwrap();
+        // Producer is still a local `btrfs send`; only the consumer is ssh-wrapped.
+        assert_eq!(
+            log.borrow()[0],
+            (
+                "PIPE btrfs|ssh".to_owned(),
+                ss(&[
+                    "send",
+                    "/pool/snap",
+                    "|",
+                    "-o",
+                    "BatchMode=yes",
+                    "isard@apolo",
+                    "--",
+                    "sudo",
+                    "btrfs",
+                    "receive",
+                    "/mnt/btrfs-test",
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_mount_table_reads_the_remote_proc_self_mounts() {
+        crate::init_test_logger();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let table = SshMountTable::new(
+            Box::new(RecordingRunner {
+                log: Rc::clone(&log),
+                stdout: "/dev/loop0 /mnt/btrfs-test btrfs rw,relatime 0 0\n".to_owned(),
+            }),
+            apolo(),
+        );
+        let entries = table.entries().unwrap();
+        // Ran `ssh apolo -- cat /proc/self/mounts` (no sudo — world-readable) ...
+        assert_eq!(
+            log.borrow()[0],
+            (
+                "ssh".to_owned(),
+                ss(&[
+                    "-o",
+                    "BatchMode=yes",
+                    "apolo",
+                    "--",
+                    "cat",
+                    "/proc/self/mounts",
+                ])
+            )
+        );
+        // ... and parsed the remote btrfs mount.
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mountpoint, PathBuf::from("/mnt/btrfs-test"));
+        assert_eq!(entries[0].fstype, "btrfs");
     }
 }
