@@ -162,10 +162,9 @@ survivor="$(remote_backups | sort | tail -1)"
 restored="$MNT/restored"
 info "phase 3: restore  ssh://…${REMOTE_PATH}/$survivor  ->  $restored  (remote send | local receive)"
 set +e
-out3="$("$MYBTRFS" restore "ssh://${REMOTE_USER}@${REMOTE_HOST}${REMOTE_PATH}/$survivor" "$restored" --yes 2>&1)"
-rc3=$?
+"$MYBTRFS" restore "ssh://${REMOTE_USER}@${REMOTE_HOST}${REMOTE_PATH}/$survivor" "$restored" --yes --lock "$LOCK" 2>&1 | sed 's/^/   /'
+rc3=${PIPESTATUS[0]}
 set -e
-printf '%s\n' "$out3" | sed 's/^/   /'
 [ "$rc3" -eq 0 ] || die "phase 3 restore exited $rc3 (see output above)"
 
 [ -d "$restored" ] || die "restore produced no subvolume at $restored"

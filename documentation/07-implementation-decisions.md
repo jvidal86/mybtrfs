@@ -160,3 +160,31 @@ user message is actionable ("re-run with sudo").
 manually against an unprivileged real run; **not yet covered by an automated test**
 (the string/kind classification in `is_permission_error` and the `exit_code_for`
 mapping are the natural unit-test targets — a follow-up).
+
+---
+
+## ID-7 — The default run-lock is per-uid (`mybtrfs-<uid>.lock`)
+
+**Date:** 2026-06-23 · **Source:** the SSH restore round-trip smoke test failing
+with an opaque `EACCES` (surfaced only after ID-6's diagnostic fix).
+
+**Context.** The run lock (ID-4) defaulted to a single shared
+`<tmpdir>/mybtrfs.lock`. `/tmp` is a world-writable **sticky** directory, and
+modern kernels default `fs.protected_regular=2`, which forbids an `O_CREAT` open
+of a regular file you do **not** own in such a directory — **even for root**. So a
+stray `/tmp/mybtrfs.lock` created by an *unprivileged* run made every later *root*
+run (the normal case — btrfs needs root) fail to acquire the lock, mis-reported as
+"needs root" (exit 4). The restore exposed it because the smoke test didn't pass
+`--lock` to that invocation.
+
+**Decision.** Default to a **per-uid** path: `<tmpdir>/mybtrfs-<uid>.lock`, with the
+effective uid read from `/proc/self/status` (safe — no `libc`/`unsafe`; falls back
+to `0`). Each uid opens a file it owns, so `fs.protected_regular` never blocks it.
+**Tradeoff:** this weakens btrbk's strictly-global single-instance lock — two
+*different* users could now run concurrently. Accepted because every run that
+actually mutates btrfs is root and so still shares `mybtrfs-0.lock`; a non-root run
+can't do btrfs work anyway. `--lock <PATH>` still pins an explicit shared lock when
+a truly global one is wanted.
+
+**Enforcement.** `lock_path`/`effective_uid` in `crates/cli/src/cli.rs`; unit-tested
+(`default_lock_path_is_per_uid_and_under_temp`).

@@ -127,8 +127,8 @@ struct Cli {
     /// Append a timestamped audit line for this invocation to the given file.
     #[arg(long, global = true, value_name = "PATH")]
     journal: Option<PathBuf>,
-    /// Lock file serializing mutating runs (default: `<tmpdir>/mybtrfs.lock`). A
-    /// second run that finds it held exits immediately with code 3.
+    /// Lock file serializing mutating runs (default: `<tmpdir>/mybtrfs-<uid>.lock`).
+    /// A second run that finds it held exits immediately with code 3.
     #[arg(long, global = true, value_name = "PATH")]
     lock: Option<PathBuf>,
 }
@@ -637,12 +637,37 @@ fn command_mutates(command: &Command) -> bool {
     }
 }
 
-/// The run-lock path: the `--lock` override, or a default under the temp dir.
+/// The run-lock path: the `--lock` override, or a **per-uid** default under the
+/// temp dir (`mybtrfs-<uid>.lock`). The uid suffix matters: `/tmp` is a
+/// world-writable sticky directory, and `fs.protected_regular` blocks an
+/// `O_CREAT` open of a file you do not own there — *even for root* — so a single
+/// shared `mybtrfs.lock` created by one user breaks every other user's run
+/// (notably: a stray unprivileged-run lock breaking the normal root run). Giving
+/// each uid its own lock file keeps it owner-openable; runs that actually touch
+/// btrfs are all root, so they still serialize against one another.
 fn lock_path(override_path: Option<&Path>) -> PathBuf {
     override_path.map_or_else(
-        || std::env::temp_dir().join("mybtrfs.lock"),
+        || std::env::temp_dir().join(format!("mybtrfs-{}.lock", effective_uid())),
         Path::to_path_buf,
     )
+}
+
+/// The process's effective uid, read from `/proc/self/status` (safe — no `libc`
+/// / `unsafe`). Falls back to `0` if it cannot be read, which at worst restores
+/// the old shared-path behavior rather than failing.
+fn effective_uid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                // "Uid:\t<real>\t<effective>\t<saved>\t<fs>" — the effective uid
+                // owns the files this process creates.
+                .and_then(|rest| rest.split_whitespace().nth(1))
+                .and_then(|uid| uid.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 /// Acquire the run lock, mapping a lock already held by another run to
@@ -1226,6 +1251,23 @@ mod tests {
         let err = acquire_lock(Some(path.as_path())).unwrap_err();
         assert_eq!(exit_code_for(&err), exit_code::LOCK_BUSY);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn default_lock_path_is_per_uid_and_under_temp() {
+        // The override is honored verbatim.
+        let explicit = PathBuf::from("/run/custom.lock");
+        assert_eq!(lock_path(Some(&explicit)), explicit);
+        // The default is `<tmpdir>/mybtrfs-<uid>.lock` — per-uid so a file owned by
+        // another user (which `fs.protected_regular` would forbid opening in a
+        // sticky dir, even for root) never collides.
+        let default = lock_path(None);
+        assert_eq!(default.parent(), Some(std::env::temp_dir().as_path()));
+        let name = default.file_name().unwrap().to_string_lossy();
+        assert_eq!(name, format!("mybtrfs-{}.lock", effective_uid()));
+        // effective_uid agrees with the file the current process would own; for a
+        // normal test run that's the invoking user's uid (non-panicking).
+        let _ = effective_uid();
     }
 
     #[test]
