@@ -96,7 +96,13 @@ their originals.**
 - **`07-implementation-decisions.md`** — the ADR-style decision log (ID-1…ID-6).
 - **`08-phase5-design.md`** — Phase 5+ design (scheduling, SSH, raw/encrypted,
   backup-set file); each slots behind the existing ports. Scheduling is shipped in
-  `contrib/`; the rest is design-only (needs real infra to validate).
+  `contrib/`; SSH §2 is implemented and validated end-to-end; the rest is
+  design-only (needs real infra to validate).
+- **`09-roadmap.md`** — post–Phase-5 roadmap & competitive positioning: maps an
+  external btrbk-replacement roadmap onto what mybtrfs already ships, settles the
+  config-vs-CLI-first conflict (backup-set sugar, not a DSL), and recommends the
+  next-version slice (status view, snapshot diff, retention-preview polish) with
+  each item tied to its port and sandbox-validatability.
 - `03-review-and-corrections.md` — the review trail (history).
 
 ## Reference implementation
