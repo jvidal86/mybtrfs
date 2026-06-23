@@ -143,9 +143,11 @@ fn run_full_backup_against_real_btrfs() {
     );
 
     // --- Restore leg (documentation/05 §6, P4-01..04) ----------------------
-    // Restore the backup to a fresh writable subvolume on the pool.
+    // Restore the backup to a fresh writable subvolume. `make_writable` is a
+    // local `btrfs subvolume snapshot` (same-filesystem only), so the dest must
+    // live on the DRIVE — the same filesystem as the backup, not the pool.
     let backup = &backups[0];
-    let dest = pool.path("home_restored");
+    let dest = drive.path("home_restored");
     let status = Command::new(env!("CARGO_BIN_EXE_mybtrfs"))
         .args(["restore", backup.to_str().unwrap(), dest.to_str().unwrap()])
         .status()
@@ -199,7 +201,7 @@ fn run_full_backup_against_real_btrfs() {
         forced.success(),
         "`mybtrfs restore --force` exited non-zero"
     );
-    let moved_aside = pool.path("home_restored.broken");
+    let moved_aside = drive.path("home_restored.broken");
     assert!(
         moved_aside.exists(),
         "the displaced destination should be at {}",
