@@ -7,14 +7,17 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use mybtrfs_adapters::{BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, SystemClock};
+use mybtrfs_adapters::{
+    AutoPrompter, BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, StdioPrompter, SystemClock,
+};
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
 use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, PortError,
+    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, FilesystemPort, PortError,
+    Prompter,
 };
 use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::{RestoreReport, RestoreService};
@@ -35,6 +38,10 @@ mod exit_code {
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Assume "yes" to confirmations (e.g. creating missing directories) — for
+    /// non-interactive / cron use.
+    #[arg(long, global = true)]
+    yes: bool,
 }
 
 /// The command set (see `documentation/01`). Phase 1 implements `snapshot` and
@@ -189,7 +196,7 @@ fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
 pub fn run() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
-    match dispatch(&cli.command) {
+    match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");
@@ -198,11 +205,17 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Wire the adapters into the use cases and execute `command`.
-fn dispatch(command: &Command) -> Result<()> {
+/// Wire the adapters into the use cases and execute the parsed command.
+fn dispatch(cli: &Cli) -> Result<()> {
     let clock = SystemClock;
     let btrfs = BtrfsCliAdapter::new();
     let localfs = LocalFsAdapter::new();
+    // `--yes` swaps the interactive prompter for the auto-confirming one.
+    let prompter: Box<dyn Prompter> = if cli.yes {
+        Box::new(AutoPrompter)
+    } else {
+        Box::new(StdioPrompter::new())
+    };
     // The committing retention service deletes through `btrfs`, but logs each
     // deletion here so partial progress is visible if a fail-fast prune aborts
     // mid-loop (decision ID-1). The dry-run path keeps its own `DryRunDeletePort`.
@@ -224,13 +237,14 @@ fn dispatch(command: &Command) -> Result<()> {
         )
     };
 
-    match command {
+    match &cli.command {
         Command::Snapshot {
             source,
             snapshot_dir,
             basename,
         } => {
             let source = validate_path(source)?;
+            ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
             // Snapshotting doesn't send, so the incremental mode is irrelevant.
             let snapshot = backup_with(Incremental::Yes)
@@ -251,6 +265,8 @@ fn dispatch(command: &Command) -> Result<()> {
             retention: retention_args,
         } => {
             let source = validate_path(source)?;
+            ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
+            ensure_dir(&localfs, prompter.as_ref(), target_dir)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
             let snapshot_policy = retention_args.snapshot_policy()?;
@@ -394,6 +410,30 @@ fn prune_with(
         snapshot_policy,
         target_policy,
     )
+}
+
+/// Ensure `dir` exists, creating it (and any missing parents) after confirmation
+/// when it does not — interactively, or automatically under `--yes`. Declining
+/// the prompt is an error: a missing directory must never silently spawn a stray
+/// backup tree, so creation is always gated on an explicit yes (decision ID-2).
+/// Used only by the commands that *write* into a directory (`run`/`snapshot`);
+/// read-only commands keep [`validate_path`] (a missing dir there is just an error).
+fn ensure_dir(fs: &dyn FilesystemPort, prompter: &dyn Prompter, dir: &Path) -> Result<()> {
+    if fs.exists(dir)? {
+        return Ok(());
+    }
+    let create = prompter.confirm(&format!(
+        "Directory does not exist: {}. Create it?",
+        dir.display()
+    ))?;
+    if !create {
+        bail!(
+            "directory does not exist (declined to create): {}",
+            dir.display()
+        );
+    }
+    fs.create_dir_all(dir)?;
+    Ok(())
 }
 
 /// Canonicalize and validate a path before handing it to the use cases
@@ -605,6 +645,66 @@ impl DeletePort for LoggingDeletePort<'_> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::cell::RefCell;
+
+    /// A `FilesystemPort` with a fixed `exists` answer that records create_dir_all.
+    struct FakeFs {
+        exists: bool,
+        created: RefCell<Vec<PathBuf>>,
+    }
+    impl FakeFs {
+        fn new(exists: bool) -> Self {
+            Self {
+                exists,
+                created: RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl FilesystemPort for FakeFs {
+        fn exists(&self, _path: &Path) -> Result<bool, PortError> {
+            Ok(self.exists)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), PortError> {
+            self.created.borrow_mut().push(path.to_path_buf());
+            Ok(())
+        }
+        fn rename(&self, _from: &Path, _to: &Path) -> Result<(), PortError> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    /// A `Prompter` that confirms (or not) without reading stdin.
+    struct FixedPrompter(bool);
+    impl Prompter for FixedPrompter {
+        fn confirm(&self, _prompt: &str) -> Result<bool, PortError> {
+            Ok(self.0)
+        }
+        fn choose(&self, _prompt: &str, _options: &[String]) -> Result<Option<usize>, PortError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn ensure_dir_is_a_noop_when_the_directory_exists() {
+        let fs = FakeFs::new(true);
+        // Would decline if asked — but an existing dir is never prompted.
+        assert!(ensure_dir(&fs, &FixedPrompter(false), Path::new("/snap")).is_ok());
+        assert!(fs.created.borrow().is_empty());
+    }
+
+    #[test]
+    fn ensure_dir_creates_after_confirmation() {
+        let fs = FakeFs::new(false);
+        assert!(ensure_dir(&fs, &FixedPrompter(true), Path::new("/snap")).is_ok());
+        assert_eq!(*fs.created.borrow(), vec![PathBuf::from("/snap")]);
+    }
+
+    #[test]
+    fn ensure_dir_errors_and_creates_nothing_when_declined() {
+        let fs = FakeFs::new(false);
+        assert!(ensure_dir(&fs, &FixedPrompter(false), Path::new("/snap")).is_err());
+        assert!(fs.created.borrow().is_empty());
+    }
 
     #[test]
     fn cli_definition_is_valid() {
