@@ -11,13 +11,14 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use mybtrfs_adapters::{
-    AutoPrompter, BtrfsCliAdapter, LocalFsAdapter, LsblkDriveDiscovery, StdioPrompter, SystemClock,
+    AutoPrompter, BtrfsCliAdapter, FileJournal, LocalFsAdapter, LsblkDriveDiscovery, NullJournal,
+    StdioPrompter, SystemClock,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
 use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, FilesystemPort, PortError,
-    Prompter,
+    ClockPort, DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, FilesystemPort,
+    Journal, PortError, Prompter,
 };
 use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::{RestoreReport, RestoreService};
@@ -87,6 +88,9 @@ struct Cli {
     /// non-interactive / cron use.
     #[arg(long, global = true)]
     yes: bool,
+    /// Append a timestamped audit line for this invocation to the given file.
+    #[arg(long, global = true, value_name = "PATH")]
+    journal: Option<PathBuf>,
 }
 
 /// The command set (see `documentation/01`). Phase 1 implements `snapshot` and
@@ -265,6 +269,19 @@ fn dispatch(cli: &Cli) -> Result<()> {
     } else {
         Box::new(StdioPrompter::new())
     };
+    // Audit the invocation to the journal (if configured); a journal failure is
+    // logged but never aborts the command.
+    let journal: Box<dyn Journal> = match &cli.journal {
+        Some(path) => Box::new(FileJournal::new(path.clone())),
+        None => Box::new(NullJournal),
+    };
+    if let Err(err) = journal.record(&format!(
+        "{} {}",
+        clock.now().to_rfc3339(),
+        describe_command(&cli.command)
+    )) {
+        log::warn!("could not write to journal: {err}");
+    }
     // The committing retention service deletes through `btrfs`, but logs each
     // deletion here so partial progress is visible if a fail-fast prune aborts
     // mid-loop (decision ID-1). The dry-run path keeps its own `DryRunDeletePort`.
@@ -538,6 +555,57 @@ fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|name| name.trim().to_owned())
         .unwrap_or_else(|_| "localhost".to_owned())
+}
+
+/// A one-line description of the invoked command for the audit journal.
+fn describe_command(command: &Command) -> String {
+    match command {
+        Command::Run {
+            source, target_dir, ..
+        } => format!(
+            "run {} -> {}",
+            source.display(),
+            target_dir.as_ref().map_or_else(
+                || "<auto-drive>".to_owned(),
+                |dir| dir.display().to_string()
+            )
+        ),
+        Command::Snapshot { source, .. } => format!("snapshot {}", source.display()),
+        Command::Resume {
+            snapshot_dir,
+            target_dir,
+            ..
+        } => format!(
+            "resume {} -> {}",
+            snapshot_dir.display(),
+            target_dir.display()
+        ),
+        Command::Prune {
+            snapshot_dir,
+            target_dir,
+            dry_run,
+            ..
+        } => format!(
+            "prune{} {} {}",
+            if *dry_run { " (dry-run)" } else { "" },
+            snapshot_dir.display(),
+            target_dir.display()
+        ),
+        Command::Restore {
+            backup,
+            dest,
+            dry_run,
+            ..
+        } => format!(
+            "restore{} {} -> {}",
+            if *dry_run { " (dry-run)" } else { "" },
+            backup.display(),
+            dest.display()
+        ),
+        Command::List { .. } => "list".to_owned(),
+        Command::Stats { .. } => "stats".to_owned(),
+        Command::ListDrives => "list-drives".to_owned(),
+    }
 }
 
 /// Validate a not-yet-existing destination (decision ID-2): its parent must
@@ -865,6 +933,25 @@ mod tests {
     fn malformed_retention_spec_is_a_usage_error() {
         let err = parse_policy("all", "7x").unwrap_err();
         assert_eq!(exit_code_for(&err), exit_code::USAGE);
+    }
+
+    #[test]
+    fn describe_command_summarizes_the_invocation() {
+        let run = Cli::try_parse_from(["mybtrfs", "run", "/p/home", "/p/.snap", "home", "/d/host"])
+            .unwrap();
+        assert_eq!(describe_command(&run.command), "run /p/home -> /d/host");
+        // An omitted target is shown as the auto-drive placeholder.
+        let auto = Cli::try_parse_from(["mybtrfs", "run", "/p/home", "/p/.snap", "home"]).unwrap();
+        assert_eq!(
+            describe_command(&auto.command),
+            "run /p/home -> <auto-drive>"
+        );
+        let prune =
+            Cli::try_parse_from(["mybtrfs", "prune", "/snap", "/target", "--dry-run"]).unwrap();
+        assert_eq!(
+            describe_command(&prune.command),
+            "prune (dry-run) /snap /target"
+        );
     }
 
     #[test]
