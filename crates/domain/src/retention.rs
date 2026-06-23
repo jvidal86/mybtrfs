@@ -8,8 +8,8 @@
 //! Faithful to btrbk `sub schedule`: the first/oldest entry of each period is the
 //! representative and rolls up into the next tier; `preserve_min` is a separate
 //! floor. Timezone is applied by the caller when building [`DatedEntry`] (so this
-//! module is pure and tz-independent). Policy *parsing* (CLI strings) is a later
-//! increment.
+//! module is pure and tz-independent). btrbk-style CLI strings are parsed by
+//! [`RetentionPolicy::parse`].
 //!
 //! TDD: the tests below are the spec, written first. Implementation follows.
 
@@ -86,6 +86,112 @@ impl Default for RetentionPolicy {
             day_of_week: chrono::Weekday::Sun,
         }
     }
+}
+
+/// Failure parsing a btrbk-style retention string.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RetentionParseError {
+    /// A schedule token wasn't `<count|*><h|d|w|m|y>` (e.g. `7d`, `*w`).
+    #[error("invalid retention token: {0:?}")]
+    Token(String),
+    /// `preserve_min` wasn't `all`, `latest`, `no`, or `<count><h|d|w|m|y>`.
+    #[error("invalid preserve-min: {0:?}")]
+    PreserveMin(String),
+}
+
+impl PreserveMin {
+    /// Parse a `preserve_min` value: `all`, `latest`, `no`, or a window like
+    /// `2d` / `18h` (btrbk-style).
+    ///
+    /// # Errors
+    /// [`RetentionParseError::PreserveMin`] if the value is not recognized.
+    pub fn parse(value: &str) -> Result<Self, RetentionParseError> {
+        match value.trim() {
+            "all" => Ok(Self::All),
+            "latest" => Ok(Self::Latest),
+            "no" => Ok(Self::None),
+            other => split_count_unit(other)
+                .map(|(count, unit)| Self::Within(count, unit))
+                .ok_or_else(|| RetentionParseError::PreserveMin(other.to_string())),
+        }
+    }
+}
+
+impl RetentionPolicy {
+    /// Build a policy from btrbk-style `preserve_min` and `preserve` (schedule)
+    /// strings. The schedule is whitespace-separated `<count|*><unit>` tokens
+    /// (e.g. `"24h 7d 4w 6m 5y"`, `"*d 4w"`); `"no"` or empty means no tiers.
+    /// `hour_of_day`/`day_of_week` keep their defaults (set them separately).
+    ///
+    /// # Errors
+    /// [`RetentionParseError`] if either string is malformed.
+    pub fn parse(preserve_min: &str, preserve: &str) -> Result<Self, RetentionParseError> {
+        let mut policy = Self {
+            preserve_min: PreserveMin::parse(preserve_min)?,
+            ..Self::default()
+        };
+        let schedule = preserve.trim();
+        if !schedule.is_empty() && schedule != "no" {
+            for token in schedule.split_whitespace() {
+                let (unit, count) = parse_tier(token)?;
+                match unit {
+                    Unit::Hours => policy.hourly = Some(count),
+                    Unit::Days => policy.daily = Some(count),
+                    Unit::Weeks => policy.weekly = Some(count),
+                    Unit::Months => policy.monthly = Some(count),
+                    Unit::Years => policy.yearly = Some(count),
+                }
+            }
+        }
+        Ok(policy)
+    }
+}
+
+/// Map a unit suffix character to its [`Unit`].
+fn unit_from_char(c: char) -> Option<Unit> {
+    match c {
+        'h' => Some(Unit::Hours),
+        'd' => Some(Unit::Days),
+        'w' => Some(Unit::Weeks),
+        'm' => Some(Unit::Months),
+        'y' => Some(Unit::Years),
+        _ => None,
+    }
+}
+
+/// Split a `<count><unit>` token into its count string and [`Unit`]; `None` if
+/// the suffix isn't a known unit or the count is empty. (The unit chars are
+/// ASCII, so trimming the final byte is always a valid boundary here.)
+fn split_unit(token: &str) -> Option<(&str, Unit)> {
+    let unit = unit_from_char(token.chars().next_back()?)?;
+    let count = &token[..token.len() - 1];
+    if count.is_empty() {
+        None
+    } else {
+        Some((count, unit))
+    }
+}
+
+/// Parse a numeric `<count><unit>` (no `*`), for `preserve_min` windows.
+fn split_count_unit(token: &str) -> Option<(u32, Unit)> {
+    let (count, unit) = split_unit(token)?;
+    Some((count.parse().ok()?, unit))
+}
+
+/// Parse a schedule tier token `<count|*><unit>`.
+fn parse_tier(token: &str) -> Result<(Unit, TierCount), RetentionParseError> {
+    let (count, unit) =
+        split_unit(token).ok_or_else(|| RetentionParseError::Token(token.to_string()))?;
+    let tier = if count == "*" {
+        TierCount::All
+    } else {
+        TierCount::Count(
+            count
+                .parse()
+                .map_err(|_| RetentionParseError::Token(token.to_string()))?,
+        )
+    };
+    Ok((unit, tier))
 }
 
 /// An entry to be scheduled. `instant` is the absolute time (for ordering);
@@ -473,5 +579,69 @@ mod tests {
         let s: Schedule<&str> = schedule(vec![], &p, dt(2024, 1, 10, 12, 0));
         assert!(s.preserve.is_empty());
         assert!(s.delete.is_empty());
+    }
+
+    // --- parsing ---
+
+    #[test]
+    fn parses_preserve_min_keywords_and_windows() {
+        assert_eq!(PreserveMin::parse("all"), Ok(PreserveMin::All));
+        assert_eq!(PreserveMin::parse("latest"), Ok(PreserveMin::Latest));
+        assert_eq!(PreserveMin::parse("no"), Ok(PreserveMin::None));
+        assert_eq!(
+            PreserveMin::parse(" 2d "),
+            Ok(PreserveMin::Within(2, Unit::Days))
+        );
+        assert_eq!(
+            PreserveMin::parse("18h"),
+            Ok(PreserveMin::Within(18, Unit::Hours))
+        );
+        assert!(PreserveMin::parse("nonsense").is_err());
+        assert!(PreserveMin::parse("7").is_err()); // no unit
+    }
+
+    #[test]
+    fn parses_full_retention_schedule() {
+        let p = RetentionPolicy::parse("latest", "24h 7d 4w 6m 5y").unwrap();
+        assert_eq!(p.preserve_min, PreserveMin::Latest);
+        assert_eq!(p.hourly, Some(TierCount::Count(24)));
+        assert_eq!(p.daily, Some(TierCount::Count(7)));
+        assert_eq!(p.weekly, Some(TierCount::Count(4)));
+        assert_eq!(p.monthly, Some(TierCount::Count(6)));
+        assert_eq!(p.yearly, Some(TierCount::Count(5)));
+    }
+
+    #[test]
+    fn parses_wildcard_tiers_and_partial_schedules() {
+        let p = RetentionPolicy::parse("all", "*d 4w").unwrap();
+        assert_eq!(p.daily, Some(TierCount::All));
+        assert_eq!(p.weekly, Some(TierCount::Count(4)));
+        assert_eq!(p.hourly, None);
+        assert_eq!(p.monthly, None);
+        assert_eq!(p.yearly, None);
+    }
+
+    #[test]
+    fn no_or_empty_schedule_means_no_tiers() {
+        let p = RetentionPolicy::parse("all", "no").unwrap();
+        assert!(
+            p.hourly.is_none()
+                && p.daily.is_none()
+                && p.weekly.is_none()
+                && p.monthly.is_none()
+                && p.yearly.is_none()
+        );
+        assert_eq!(
+            RetentionPolicy::parse("all", "   ").unwrap(),
+            RetentionPolicy::default()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_schedule_tokens() {
+        assert!(RetentionPolicy::parse("all", "7x").is_err()); // unknown unit
+        assert!(RetentionPolicy::parse("all", "d").is_err()); // no count
+        assert!(RetentionPolicy::parse("all", "7d xyz").is_err()); // bad second token
+        assert!(RetentionPolicy::parse("all", "7").is_err()); // no unit
     }
 }
