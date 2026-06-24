@@ -1221,21 +1221,10 @@ fn print_stats(stats: &Stats) {
 
 /// Print backup health status.
 fn print_status(report: &mybtrfs_application::status::StatusReport) {
-    println!("Status Report");
-    println!("────────────────────────────────────────────────");
-    println!("Source:      {}", report.source_dir.display());
-    println!("Target:      {}", report.target_dir.display());
-    println!();
-    println!(
-        "Snapshot count:  {} snapshot{}",
-        report.snapshots.len(),
-        if report.snapshots.len() == 1 { "" } else { "s" }
-    );
-    println!(
-        "Backup count:    {} backup{}",
-        report.backups.len(),
-        if report.backups.len() == 1 { "" } else { "s" }
-    );
+    println!("source\t{}", report.source_dir.display());
+    println!("target\t{}", report.target_dir.display());
+    println!("snapshots\t{}", report.snapshots.len());
+    println!("backups\t{}", report.backups.len());
 }
 
 /// Print snapshot diff summary.

@@ -1,7 +1,7 @@
-//! Retention preview — pretty-print what `prune` would delete before it runs.
+//! Retention preview — output what `prune` would delete before it runs.
 //!
-//! TDD stubs for Phase 1: extend the existing `Schedule<T>` display logic into a
-//! human-readable formatter. No new logic; just a view over existing prune results.
+//! Tab-separated format (action, name, age) for easy parsing with grep/awk.
+//! No decorative elements; output designed for scripting.
 
 use chrono::Local;
 use mybtrfs_domain::model::Subvolume;
@@ -12,14 +12,15 @@ use mybtrfs_domain::retention::Schedule;
 // Implementation
 // ============================================================================
 
-/// Format a retention `Schedule<T>` as a human-readable preview string.
-/// Separates PRESERVE and DELETE partitions, includes counts and ages.
+/// Format a retention `Schedule<T>` as tab-separated output.
+/// Output: action (preserve/delete), snapshot name, age.
+/// No header row; designed for grep/awk parsing.
 ///
 /// # Arguments
 /// * `schedule` — the computed schedule (preserve/delete partitions)
 ///
 /// # Returns
-/// A formatted string suitable for terminal display.
+/// Tab-separated lines: `action\tname\tage`.
 #[must_use]
 pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
     let now = Local::now();
@@ -27,57 +28,34 @@ pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
 
     use std::ffi::OsStr;
 
-    // PRESERVE section
-    if !schedule.preserve.is_empty() {
-        output.push_str("PRESERVE (");
-        output.push_str(&schedule.preserve.len().to_string());
-        output.push_str(" snapshot");
-        if schedule.preserve.len() != 1 {
-            output.push('s');
-        }
-        output.push_str("):\n");
-        for sv in &schedule.preserve {
-            let name = sv
-                .path
-                .file_name()
-                .and_then(|n: &OsStr| n.to_str())
-                .unwrap_or("?");
-            let age = compute_age(name, &now);
-            output.push_str("  ✅ ");
-            output.push_str(name);
-            output.push_str(" (");
-            output.push_str(&age);
-            output.push_str(")\n");
-        }
+    // PRESERVE rows
+    for sv in &schedule.preserve {
+        let name = sv
+            .path
+            .file_name()
+            .and_then(|n: &OsStr| n.to_str())
+            .unwrap_or("?");
+        let age = compute_age(name, &now);
+        output.push_str("preserve\t");
+        output.push_str(name);
+        output.push('\t');
+        output.push_str(&age);
         output.push('\n');
     }
 
-    // DELETE section
-    if !schedule.delete.is_empty() {
-        output.push_str("DELETE (");
-        output.push_str(&schedule.delete.len().to_string());
-        output.push_str(" snapshot");
-        if schedule.delete.len() != 1 {
-            output.push('s');
-        }
-        output.push_str(") — run with --yes to confirm:\n");
-        for sv in &schedule.delete {
-            let name = sv
-                .path
-                .file_name()
-                .and_then(|n: &OsStr| n.to_str())
-                .unwrap_or("?");
-            let age = compute_age(name, &now);
-            output.push_str("  ⚠️  ");
-            output.push_str(name);
-            output.push_str(" (");
-            output.push_str(&age);
-            output.push_str(")\n");
-        }
-    } else if schedule.preserve.is_empty() {
-        output.push_str("No snapshots to manage.\n");
-    } else {
-        output.push_str("No snapshots to delete.\n");
+    // DELETE rows
+    for sv in &schedule.delete {
+        let name = sv
+            .path
+            .file_name()
+            .and_then(|n: &OsStr| n.to_str())
+            .unwrap_or("?");
+        let age = compute_age(name, &now);
+        output.push_str("delete\t");
+        output.push_str(name);
+        output.push('\t');
+        output.push_str(&age);
+        output.push('\n');
     }
 
     output
