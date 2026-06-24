@@ -32,6 +32,8 @@ mybtrfs-adapters = { path = "crates/adapters" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+dead_code = "warn"
+unused_imports = "warn"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

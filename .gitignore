@@ -1,4 +1,5 @@
 /target
+/coverage
 
 # Diagnostic captures (e.g. `RUST_LOG=debug mybtrfs … 2>debug.log`) — never tracked.
 *.log
