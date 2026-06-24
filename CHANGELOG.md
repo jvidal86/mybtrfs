@@ -6,18 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
-### Added
+### Planned for v1.x+
 
-- **`list-subvolumes` command:** lists every btrfs subvolume on the local system, across all mounted btrfs filesystems, for picking a backup source. Read-only; tab-separated output (`id  path  fs-mountpoint  uuid  ro|rw`). Complements `list-drives` (which lists the filesystems themselves). Implemented as a `LocalSubvolumesService` use case composing the existing `DriveDiscoveryPort` (lsblk) and `SubvolumeRepository` (`btrfs subvolume list`) ports — no new port. Requires root (runs `btrfs subvolume list`), so it exits with code 4 without it, like `list`.
-
-### Planned for v1.x ("make it visible")
-
-- Status view backed by journal (visibility into last-run health)
-- Snapshot diff (show what changed between two snapshots)
-- Retention preview polish (enhanced dry-run output)
+- Snapshot diff parsing tuning for all btrfs versions
 - Backup-set file support (multi-subvolume cron sugar, if needed)
+- Raw/encrypted targets (design-only, needs GPG infrastructure)
 
 See `documentation/09-roadmap.md` §6 for detailed prioritization and validatability gates.
+
+## [1.1] — 2026-06-24
+
+### Observability Complete — Backup Health Tracking & Progress Feedback
+
+#### Phase 1: Retention Preview
+- `mybtrfs prune --dry-run` shows what snapshots/backups would be deleted
+- Tab-separated output (action, name, age) — scriptable via grep/awk
+- GFS retention policies (hourly/daily/weekly/monthly/yearly)
+- No mutations with `--dry-run` flag
+
+#### Phase 2: Status View with Journal-Backed Health
+- `mybtrfs status <snapshots> <backups>` shows backup health (counts, sync status)
+- Journal-backed operational history: `last_run` and `last_command` tracked
+- Journal defaults to `/var/log/mybtrfs.journal` (user-readable, persists)
+- Parent directory auto-creation for journal file
+
+#### Progress Indicators
+- Spinners for scanning/metadata operations (all commands: run, prune, restore, list, inventory)
+- Progress bars with percentage for deletion loops
+- Transfer speed and byte reporting for send/receive
+- Clears before final output (no UI noise)
+
+#### CLI Output Standardized
+- Tab-separated format across all commands (scriptable with grep/awk)
+- Removed emojis and decorative elements
+- Consistent format: `action\tname\tdetail`
+
+#### Phase 3: Snapshot Diff (Early Access)
+- `mybtrfs diff <older_snap> <newer_snap>` estimates byte changes
+- Uses `btrfs subvolume find-new` for actual changed bytes
+- Useful for predicting incremental backup size
+- Output: `older_path	older_size	newer_path	newer_size	changed_size`
+
+#### Validation & Quality
+- ✓ 221 unit tests passing
+- ✓ 4 E2E tests passing (full backup, incremental, prune safety, restore)
+- ✓ All safety invariants verified (UUID tracking, send/receive verification, delete-safety anchors)
+
+#### Bug Fixes
+- Fixed journal directory auto-creation (FileJournal now `mkdir -p` parent dirs)
+- Fixed journal default path to `/var/log/mybtrfs.journal` (root-accessible when run under sudo)
+- Optimized E2E tests: reduced loopback image size (400M → 150M)
+- Added auto-sudo for privileged E2E commands (losetup, mkfs.btrfs, mount, btrfs)
 
 ## [0.2.0] — 2026-06-24
 
@@ -84,5 +123,6 @@ All core invariants preserved from btrbk:
 - Repository: https://github.com/jvidal86/mybtrfs
 - License: GPL-3.0-or-later
 
-[Unreleased]: https://github.com/jvidal86/mybtrfs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jvidal86/mybtrfs/compare/v1.1...HEAD
+[1.1]: https://github.com/jvidal86/mybtrfs/compare/v0.2.0...v1.1
 [0.2.0]: https://github.com/jvidal86/mybtrfs/releases/tag/v0.2.0

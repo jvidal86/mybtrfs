@@ -801,15 +801,18 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let show_old_output = String::from_utf8_lossy(&show_old.stdout);
             let older_cgen = show_old_output
                 .lines()
-                .find(|l| l.contains("Generation (Gen):"))
+                .find(|l| l.contains("Gen:") && !l.contains("Generation"))
+                .or_else(|| show_old_output.lines().find(|l| l.contains("Generation (Gen):")))
                 .and_then(|l| l.split(':').last())
-                .and_then(|s| s.trim().parse::<u64>().ok())
+                .and_then(|s| s.trim().split_whitespace().next())
+                .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
 
-            // Get actual size of older snapshot (use Referenced field as proxy)
+            // Get actual size of older snapshot (use Referenced or Exclusive field)
             let older_bytes = show_old_output
                 .lines()
                 .find(|l| l.contains("Referenced:"))
+                .or_else(|| show_old_output.lines().find(|l| l.contains("Exclusive:")))
                 .and_then(|l| l.split(':').last())
                 .and_then(|s| parse_size_bytes(s))
                 .unwrap_or(0);
@@ -823,6 +826,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let newer_bytes = show_new_output
                 .lines()
                 .find(|l| l.contains("Referenced:"))
+                .or_else(|| show_new_output.lines().find(|l| l.contains("Exclusive:")))
                 .and_then(|l| l.split(':').last())
                 .and_then(|s| parse_size_bytes(s))
                 .unwrap_or(0);
@@ -840,9 +844,8 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let find_new_output = String::from_utf8_lossy(&find_new.stdout);
             let changed_bytes = find_new_output
                 .lines()
-                .filter(|l| l.contains("total"))
-                .last()
-                .and_then(|l| l.split_whitespace().next())
+                .find(|l| l.contains("total"))
+                .and_then(|l| l.split_whitespace().rev().next())
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
 
