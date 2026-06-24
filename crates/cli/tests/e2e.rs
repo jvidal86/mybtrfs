@@ -30,11 +30,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run `program args…`, asserting success; returns the captured stdout.
+/// Automatically uses sudo for commands that require root.
 fn sh(program: &str, args: &[&str]) -> String {
-    let out = Command::new(program)
-        .args(args)
+    // Commands that need root
+    let needs_root = matches!(program, "losetup" | "mkfs.btrfs" | "mount" | "umount" | "btrfs");
+
+    let (cmd, final_args) = if needs_root {
+        ("sudo", {
+            let mut v = vec![program];
+            v.extend_from_slice(args);
+            v
+        })
+    } else {
+        (program, args.to_vec())
+    };
+
+    let out = Command::new(cmd)
+        .args(&final_args)
         .output()
-        .unwrap_or_else(|err| panic!("failed to spawn `{program}`: {err}"));
+        .unwrap_or_else(|err| panic!("failed to spawn `{cmd}`: {err}"));
     assert!(
         out.status.success(),
         "`{program} {}` failed ({}): {}",
@@ -56,7 +70,7 @@ impl LoopbackBtrfs {
     fn create(tag: &str) -> Self {
         let image = PathBuf::from(format!("/tmp/mybtrfs-e2e-{tag}.img"));
         let mountpoint = PathBuf::from(format!("/tmp/mybtrfs-e2e-{tag}-mnt"));
-        sh("truncate", &["-s", "400M", image.to_str().unwrap()]);
+        sh("truncate", &["-s", "150M", image.to_str().unwrap()]);
         sh("mkfs.btrfs", &["-q", image.to_str().unwrap()]);
         fs::create_dir_all(&mountpoint).unwrap();
         let loop_dev = sh("losetup", &["--find", "--show", image.to_str().unwrap()])
