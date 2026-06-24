@@ -466,6 +466,71 @@ impl RetentionArgs {
     }
 }
 
+/// Parse a per-entry `incremental` string from a backup-set file ("yes" / "strict" / "no"),
+/// falling back to the CLI-level value when the field is absent.
+///
+/// # Errors
+/// Returns an error if `s` is present but is not "yes", "strict", or "no".
+fn entry_incremental(s: Option<&str>, fallback: Incremental) -> Result<Incremental> {
+    match s {
+        None => Ok(fallback),
+        Some("yes") => Ok(Incremental::Yes),
+        Some("strict") => Ok(Incremental::Strict),
+        Some("no") => Ok(Incremental::No),
+        Some(other) => Err(anyhow::anyhow!(
+            "invalid incremental value {other:?}; expected yes, strict, or no"
+        )),
+    }
+}
+
+/// Build a [`RetentionPolicy`] from the per-job tier fields of a backup-set entry.
+///
+/// Falls back to `fallback` if none of the entry-level fields are set, so CLI-level
+/// defaults are inherited when the backup-set file omits retention for an entry.
+///
+/// `preserve_min` maps to `--snapshot-preserve-min` / `--target-preserve-min`.
+/// The remaining arguments map to the individual `*_hourly` / `*_daily` / …  fields.
+///
+/// # Errors
+/// Returns an error if `preserve_min` is a present-but-invalid value.
+fn entry_policy(
+    preserve_min: Option<&str>,
+    hourly: Option<usize>,
+    daily: Option<usize>,
+    weekly: Option<usize>,
+    monthly: Option<usize>,
+    yearly: Option<usize>,
+    fallback: &RetentionPolicy,
+) -> Result<RetentionPolicy> {
+    let has_any = preserve_min.is_some()
+        || hourly.is_some()
+        || daily.is_some()
+        || weekly.is_some()
+        || monthly.is_some()
+        || yearly.is_some();
+    if !has_any {
+        return Ok(fallback.clone());
+    }
+    let min = preserve_min.unwrap_or("all");
+    let mut tiers: Vec<String> = Vec::new();
+    if let Some(n) = hourly {
+        tiers.push(format!("{n}h"));
+    }
+    if let Some(n) = daily {
+        tiers.push(format!("{n}d"));
+    }
+    if let Some(n) = weekly {
+        tiers.push(format!("{n}w"));
+    }
+    if let Some(n) = monthly {
+        tiers.push(format!("{n}m"));
+    }
+    if let Some(n) = yearly {
+        tiers.push(format!("{n}y"));
+    }
+    parse_policy(min, &tiers.join(" "))
+}
+
 /// Parse a single retention policy, mapping a malformed spec to a user-facing error.
 fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
     RetentionPolicy::parse(preserve_min, preserve).map_err(|err| {
@@ -652,45 +717,49 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     ensure_dir(&localfs, prompter.as_ref(), &entry.snapshot_dir)?;
                     let snapshot_dir_val = validate_path(&entry.snapshot_dir)?;
 
-                    // Respect retention options from the backup-set entry if provided,
-                    // otherwise fall back to command-line retention args.
-                    let snapshot_policy = if entry.snapshot_preserve_min.is_some()
-                        || entry.snapshot_preserve_hourly.is_some()
-                        || entry.snapshot_preserve_daily.is_some()
-                        || entry.snapshot_preserve_weekly.is_some()
-                        || entry.snapshot_preserve_monthly.is_some()
-                        || entry.snapshot_preserve_yearly.is_some()
-                    {
-                        // Build a policy string from entry fields (for now, use the command-line default)
-                        snapshot_policy.clone()
-                    } else {
-                        snapshot_policy.clone()
-                    };
+                    let entry_snapshot_policy = entry_policy(
+                        entry.snapshot_preserve_min.as_deref(),
+                        entry.snapshot_preserve_hourly,
+                        entry.snapshot_preserve_daily,
+                        entry.snapshot_preserve_weekly,
+                        entry.snapshot_preserve_monthly,
+                        entry.snapshot_preserve_yearly,
+                        &snapshot_policy,
+                    )
+                    .with_context(|| {
+                        format!("backup-set entry {}: invalid snapshot retention", idx + 1)
+                    })?;
 
-                    let target_policy = if entry.target_preserve_min.is_some()
-                        || entry.target_preserve_hourly.is_some()
-                        || entry.target_preserve_daily.is_some()
-                        || entry.target_preserve_weekly.is_some()
-                        || entry.target_preserve_monthly.is_some()
-                        || entry.target_preserve_yearly.is_some()
-                    {
-                        target_policy.clone()
-                    } else {
-                        target_policy.clone()
-                    };
+                    let entry_target_policy = entry_policy(
+                        entry.target_preserve_min.as_deref(),
+                        entry.target_preserve_hourly,
+                        entry.target_preserve_daily,
+                        entry.target_preserve_weekly,
+                        entry.target_preserve_monthly,
+                        entry.target_preserve_yearly,
+                        &target_policy,
+                    )
+                    .with_context(|| {
+                        format!("backup-set entry {}: invalid target retention", idx + 1)
+                    })?;
+
+                    let entry_inc = entry_incremental(entry.incremental.as_deref(), incremental)
+                        .with_context(|| {
+                            format!("backup-set entry {}: invalid incremental", idx + 1)
+                        })?;
 
                     let target = parse_target(&entry.target_dir)?;
                     let _report = match target {
                         Endpoint::Local(dir) => {
                             ensure_dir(&localfs, prompter.as_ref(), &dir)?;
                             let dir_val = validate_path(&dir)?;
-                            backup_with(incremental).run(
+                            backup_with(entry_inc).run(
                                 &source_val,
                                 &snapshot_dir_val,
                                 &entry.basename,
                                 &dir_val,
-                                &snapshot_policy,
-                                &target_policy,
+                                &entry_snapshot_policy,
+                                &entry_target_policy,
                             )
                         }
                         Endpoint::Remote { ssh, path } => {
@@ -706,15 +775,15 @@ fn dispatch(cli: &Cli) -> Result<()> {
                                 &ssh_btrfs,
                                 &remote_retention,
                                 TimestampFormat::Long,
-                                incremental,
+                                entry_inc,
                             )
                             .run(
                                 &source_val,
                                 &snapshot_dir_val,
                                 &entry.basename,
                                 &path,
-                                &snapshot_policy,
-                                &target_policy,
+                                &entry_snapshot_policy,
+                                &entry_target_policy,
                             )
                         }
                     }
@@ -2075,5 +2144,63 @@ mod tests {
             }
             _ => panic!("expected a Run command"),
         }
+    }
+
+    #[test]
+    fn entry_policy_falls_back_when_no_entry_fields_set() {
+        let fallback = RetentionPolicy::parse("latest", "7d").unwrap();
+        let result = entry_policy(None, None, None, None, None, None, &fallback).unwrap();
+        assert_eq!(result, fallback);
+    }
+
+    #[test]
+    fn entry_policy_builds_from_individual_tier_fields() {
+        let fallback = RetentionPolicy::default();
+        let result = entry_policy(None, Some(24), Some(7), Some(4), None, None, &fallback).unwrap();
+        // Should differ from the keep-all fallback: it now has tiers.
+        assert_ne!(result, fallback);
+    }
+
+    #[test]
+    fn entry_policy_preserve_min_overrides_default() {
+        let fallback = RetentionPolicy::default();
+        let result =
+            entry_policy(Some("latest"), None, Some(7), None, None, None, &fallback).unwrap();
+        assert_ne!(result, fallback);
+    }
+
+    #[test]
+    fn entry_policy_invalid_preserve_min_is_an_error() {
+        let fallback = RetentionPolicy::default();
+        assert!(entry_policy(Some("bogus"), None, Some(7), None, None, None, &fallback).is_err());
+    }
+
+    #[test]
+    fn entry_incremental_falls_back_when_none() {
+        assert_eq!(
+            entry_incremental(None, Incremental::Strict).unwrap(),
+            Incremental::Strict
+        );
+    }
+
+    #[test]
+    fn entry_incremental_parses_known_values() {
+        assert_eq!(
+            entry_incremental(Some("yes"), Incremental::No).unwrap(),
+            Incremental::Yes
+        );
+        assert_eq!(
+            entry_incremental(Some("strict"), Incremental::Yes).unwrap(),
+            Incremental::Strict
+        );
+        assert_eq!(
+            entry_incremental(Some("no"), Incremental::Yes).unwrap(),
+            Incremental::No
+        );
+    }
+
+    #[test]
+    fn entry_incremental_errors_on_unknown_value() {
+        assert!(entry_incremental(Some("maybe"), Incremental::Yes).is_err());
     }
 }
