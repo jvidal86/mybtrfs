@@ -754,6 +754,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let status = StatusService {
                 source_repo: &btrfs,
                 target_repo: &btrfs,
+                journal: Some(journal.as_ref()),
             }
             .report(&snapshot_dir, &target_dir)
             .context("computing status failed")?;
@@ -1210,6 +1211,10 @@ fn print_status(report: &mybtrfs_application::status::StatusReport) {
     println!("target\t{}", report.target_dir.display());
     println!("snapshots\t{}", report.snapshots.len());
     println!("backups\t{}", report.backups.len());
+    if let Some(ref last_run) = report.last_run {
+        println!("last_run\t{}", last_run.timestamp);
+        println!("last_command\t{}", last_run.command);
+    }
 }
 
 /// Print snapshot diff summary.

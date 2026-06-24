@@ -209,6 +209,18 @@ pub trait Journal {
     /// # Errors
     /// [`PortError::Io`] if the entry cannot be written.
     fn record(&self, message: &str) -> Result<(), PortError>;
+
+    /// Read the last `count` entries from the journal, most recent first.
+    ///
+    /// # Errors
+    /// [`PortError::Io`] if the journal file cannot be read (including if it
+    /// doesn't exist). Malformed entries are skipped silently. Returns an empty
+    /// vec if the journal is empty or unreadable.
+    fn last_entries(&self, count: usize) -> Result<Vec<String>, PortError> {
+        // Default implementation: no-op, suitable for NullJournal
+        let _ = count;
+        Ok(Vec::new())
+    }
 }
 
 /// Terminal progress reporting — driven by the CLI composition root.

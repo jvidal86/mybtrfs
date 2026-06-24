@@ -5,7 +5,7 @@
 //! See `documentation/02-architecture-v2.md`.
 
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use mybtrfs_application::ports::{Journal, PortError};
@@ -31,6 +31,35 @@ impl Journal for FileJournal {
             .open(&self.path)?;
         writeln!(file, "{message}")?;
         Ok(())
+    }
+
+    fn last_entries(&self, count: usize) -> Result<Vec<String>, PortError> {
+        // If the journal file doesn't exist, return an empty vector (not an error).
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+
+        // Read all lines from the journal file.
+        let file = std::fs::File::open(&self.path)?;
+        let reader = BufReader::new(file);
+        let mut lines: Vec<String> = Vec::new();
+        // Intentionally skip lines that fail to parse; journal may have partial writes.
+        #[allow(clippy::manual_flatten)]
+        for line_result in reader.lines() {
+            if let Ok(line) = line_result {
+                lines.push(line);
+            }
+        }
+
+        // Return the last `count` entries, most recent first (i.e., reversed).
+        let start = if lines.len() > count {
+            lines.len() - count
+        } else {
+            0
+        };
+        let mut result: Vec<String> = lines[start..].to_vec();
+        result.reverse();
+        Ok(result)
     }
 }
 
@@ -80,5 +109,52 @@ mod tests {
     fn null_journal_records_nothing() {
         crate::init_test_logger();
         assert!(NullJournal.record("ignored").is_ok());
+    }
+
+    #[test]
+    fn last_entries_returns_empty_if_journal_not_exists() {
+        crate::init_test_logger();
+        let path = temp_path("nonexistent");
+        let journal = FileJournal::new(path);
+        let entries = journal.last_entries(5).unwrap();
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn last_entries_returns_all_if_fewer_than_count() {
+        crate::init_test_logger();
+        let path = temp_path("fewer");
+        let journal = FileJournal::new(path.clone());
+
+        journal.record("entry 1").unwrap();
+        journal.record("entry 2").unwrap();
+        journal.record("entry 3").unwrap();
+
+        let entries = journal.last_entries(10).unwrap();
+        assert_eq!(entries.len(), 3);
+        // Most recent first
+        assert_eq!(entries[0], "entry 3");
+        assert_eq!(entries[1], "entry 2");
+        assert_eq!(entries[2], "entry 1");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn last_entries_returns_most_recent_in_order() {
+        crate::init_test_logger();
+        let path = temp_path("truncate");
+        let journal = FileJournal::new(path.clone());
+
+        journal.record("entry 1").unwrap();
+        journal.record("entry 2").unwrap();
+        journal.record("entry 3").unwrap();
+        journal.record("entry 4").unwrap();
+        journal.record("entry 5").unwrap();
+
+        let entries = journal.last_entries(2).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "entry 5"); // most recent
+        assert_eq!(entries[1], "entry 4");
+        std::fs::remove_file(&path).unwrap();
     }
 }

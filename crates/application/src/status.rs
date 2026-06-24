@@ -1,10 +1,20 @@
 //! Status view — show backup health (counts, ages, health checks) without a side database.
 //!
 //! Stateless: re-derives all truth from btrfs metadata (timestamps in snapshot names, cgens, received_uuid).
+//! Optionally augmented with last-run information from the journal.
 
-use crate::ports::SubvolumeRepository;
+use crate::ports::{Journal, SubvolumeRepository};
 use mybtrfs_domain::model::Subvolume;
 use std::path::PathBuf;
+
+/// Information about the last backup run, parsed from the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastRunInfo {
+    /// ISO 8601 timestamp of when the command was executed.
+    pub timestamp: String,
+    /// The command that was executed (e.g. "run backup").
+    pub command: String,
+}
 
 /// A status report: snapshot/backup counts, latest ages, health checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,16 +27,21 @@ pub struct StatusReport {
     pub snapshots: Vec<Subvolume>,
     /// List of backups found in target.
     pub backups: Vec<Subvolume>,
+    /// Optional last-run information from the journal.
+    pub last_run: Option<LastRunInfo>,
 }
 
 /// Service to compute backup health status (counts, ages, health checks).
 ///
-/// Stateless: re-derives all truth from btrfs metadata. No side database or journal dependency.
+/// Stateless: re-derives all truth from btrfs metadata. Optionally augmented with
+/// last-run information from the journal.
 pub struct StatusService<'a> {
     /// Repository for snapshot listing.
     pub source_repo: &'a dyn SubvolumeRepository,
     /// Repository for backup listing.
     pub target_repo: &'a dyn SubvolumeRepository,
+    /// Optional journal for reading last-run entries.
+    pub journal: Option<&'a dyn Journal>,
 }
 
 impl<'a> StatusService<'a> {
@@ -37,7 +52,7 @@ impl<'a> StatusService<'a> {
     /// * `target_dir` — path where backups live
     ///
     /// # Returns
-    /// A `StatusReport` with snapshot/backup lists and metadata.
+    /// A `StatusReport` with snapshot/backup lists and optional last-run info.
     ///
     /// # Errors
     /// Returns a `PortError` if either repo query fails (I/O, permission, invalid path).
@@ -48,13 +63,44 @@ impl<'a> StatusService<'a> {
     ) -> Result<StatusReport, crate::ports::PortError> {
         let snapshots = self.source_repo.list(source_dir)?;
         let backups = self.target_repo.list(target_dir)?;
+
+        // Try to read last-run info from journal, if configured.
+        let last_run = self.journal.and_then(|journal| {
+            // Read the most recent entry (we only care about the very last one).
+            match journal.last_entries(1) {
+                Ok(entries) => entries
+                    .into_iter()
+                    .next()
+                    .and_then(|entry| parse_last_entry(&entry)),
+                Err(_) => None,
+            }
+        });
+
         Ok(StatusReport {
             source_dir: source_dir.to_path_buf(),
             target_dir: target_dir.to_path_buf(),
             snapshots,
             backups,
+            last_run,
         })
     }
+}
+
+/// Parse a journal entry to extract timestamp and command.
+/// Format: "ISO-8601-TIMESTAMP command description"
+fn parse_last_entry(entry: &str) -> Option<LastRunInfo> {
+    let mut parts = entry.split_whitespace();
+
+    // Expect at least timestamp + one word of command
+    let timestamp = parts.next()?.to_string();
+    let command = parts.next()?.to_string();
+
+    // Check if timestamp looks like ISO 8601 (starts with year-like pattern YYYY-MM-DD)
+    if !timestamp.contains('-') || !timestamp.contains('T') {
+        return None;
+    }
+
+    Some(LastRunInfo { timestamp, command })
 }
 
 #[cfg(test)]
@@ -115,6 +161,7 @@ mod service_tests {
         let service = StatusService {
             source_repo: &source_repo,
             target_repo: &target_repo,
+            journal: None,
         };
 
         // Act
@@ -130,6 +177,7 @@ mod service_tests {
         assert_eq!(report.backups.len(), 1);
         assert_eq!(report.source_dir, PathBuf::from("/source/.snapshots"));
         assert_eq!(report.target_dir, PathBuf::from("/target/backups"));
+        assert!(report.last_run.is_none());
     }
 }
 
@@ -183,6 +231,7 @@ mod tests {
             target_dir: PathBuf::from("/target/backups"),
             snapshots,
             backups,
+            last_run: None,
         };
 
         // Act & Assert
@@ -239,6 +288,7 @@ mod tests {
             target_dir: PathBuf::from("/target"),
             snapshots: vec![],
             backups: vec![mock_subvolume("data.20260624T1432", 10, true, true)],
+            last_run: None,
         };
 
         // Act & Assert
@@ -251,6 +301,7 @@ mod tests {
             target_dir: PathBuf::from("/target"),
             snapshots: vec![mock_subvolume("data.20260624T1432", 1, true, false)],
             backups: vec![],
+            last_run: None,
         };
 
         // Act & Assert
@@ -365,6 +416,7 @@ mod tests {
             target_dir: PathBuf::from("/mnt/backup/daily"),
             snapshots,
             backups,
+            last_run: None,
         };
 
         // Act & Assert
@@ -372,5 +424,27 @@ mod tests {
         assert_eq!(report.backups.len(), 3);
         assert!(report.snapshots.iter().all(|sv| sv.readonly));
         assert!(report.backups.iter().all(|sv| sv.received_uuid.is_some()));
+    }
+
+    /// **TEST: parse_last_entry extracts timestamp and command from journal entry**
+    #[test]
+    fn parse_last_entry_extracts_timestamp_and_command() {
+        let entry = "2026-06-24T15:37:42Z run something";
+        let parsed = parse_last_entry(entry);
+        assert!(parsed.is_some());
+        let info = parsed.unwrap();
+        assert_eq!(info.timestamp, "2026-06-24T15:37:42Z");
+        assert_eq!(info.command, "run");
+    }
+
+    /// **TEST: parse_last_entry returns None for malformed entries**
+    #[test]
+    fn parse_last_entry_rejects_malformed() {
+        // Missing timestamp
+        assert!(parse_last_entry("run something").is_none());
+        // Timestamp doesn't look like ISO 8601
+        assert!(parse_last_entry("12345 run").is_none());
+        // Empty entry
+        assert!(parse_last_entry("").is_none());
     }
 }
