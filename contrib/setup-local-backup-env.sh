@@ -60,33 +60,47 @@ load_state() {
   [ -n "${SOURCE_LOOP:-}" ] && [ -n "${BACKUP_LOOP:-}" ]
 }
 
-# Populate filesystem with varied test files (~50 MB first time, ~15 MB on subsequent runs)
+# Populate a directory with varied test files.
+#   $1 target dir   $2 batch name (unique prefix)   $3 profile: full|small
+# "full"  (~40 MB) seeds the initial @data on setup.
+# "small" (~10 MB) simulates a day's churn on each `populate` so the 500 MB
+#                  source isn't filled after a handful of runs.
 populate_data() {
   local target_dir="$1"
   local batch_name="$2"
+  local profile="${3:-full}"
+
+  local doc_count code_count media_count media_max
+  if [ "$profile" = small ]; then
+    doc_count=8;  code_count=2; media_count=1; media_max=8
+  else
+    doc_count=20; code_count=5; media_count=3; media_max=10
+  fi
 
   mkdir -p "$target_dir/docs" "$target_dir/code" "$target_dir/media"
 
   # Docs: text files 1-100 KB
   info "  Creating doc files..."
-  for i in {1..20}; do
-    local size=$((RANDOM % 100 + 1))
+  local i size
+  for ((i = 1; i <= doc_count; i++)); do
+    size=$((RANDOM % 100 + 1))
     dd if=/dev/urandom bs=1K count="$size" of="$target_dir/docs/${batch_name}_doc_$i.md" 2>/dev/null
   done
 
   # Code: source files 1-500 KB
   info "  Creating source files..."
+  local ext
   for ext in rs py sh json; do
-    for i in {1..5}; do
-      local size=$((RANDOM % 500 + 1))
+    for ((i = 1; i <= code_count; i++)); do
+      size=$((RANDOM % 500 + 1))
       dd if=/dev/urandom bs=1K count="$size" of="$target_dir/code/${batch_name}_file_$i.$ext" 2>/dev/null
     done
   done
 
-  # Media: binary blobs 1-10 MB
+  # Media: binary blobs 1 - media_max MB
   info "  Creating media files..."
-  for i in {1..3}; do
-    local size=$((RANDOM % 10 + 1))
+  for ((i = 1; i <= media_count; i++)); do
+    size=$((RANDOM % media_max + 1))
     dd if=/dev/urandom bs=1M count="$size" of="$target_dir/media/${batch_name}_media_$i.bin" 2>/dev/null
   done
 }
@@ -98,6 +112,12 @@ cmd_setup() {
   # Guard: fail if already set up
   if mountpoint -q "$SOURCE_MNT" 2>/dev/null; then
     error "already set up — source is mounted at $SOURCE_MNT. Run 'teardown' first."
+  fi
+  # Catch a half-finished prior setup: images still backed by live loop devices
+  # (mount may have failed). Clobbering them with truncate would corrupt state.
+  if losetup -j "$SOURCE_IMG" 2>/dev/null | grep -q . \
+     || losetup -j "$BACKUP_IMG" 2>/dev/null | grep -q .; then
+    error "a loop device is still attached to an image — run 'teardown' first."
   fi
 
   info "Creating loopback images..."
@@ -134,7 +154,7 @@ cmd_setup() {
   info "Populating with test data..."
   local batch_name
   batch_name=$(date +%Y%m%d_%H%M%S)
-  populate_data "$SOURCE_MNT/@data" "$batch_name"
+  populate_data "$SOURCE_MNT/@data" "$batch_name" full
   ok "test data populated (batch: $batch_name)"
 
   # Save state for teardown
@@ -275,7 +295,9 @@ cmd_status() {
   echo "Images:"
   if [ -f "$SOURCE_IMG" ]; then
     local src_size
-    src_size=$(du -h "$SOURCE_IMG" | cut -f1)
+    # --apparent-size: report the nominal size (images are sparse, so plain
+    # `du` would show only allocated blocks — near 0 right after truncate).
+    src_size=$(du -h --apparent-size "$SOURCE_IMG" | cut -f1)
     echo "  ✓ $SOURCE_IMG ($src_size)"
   else
     echo "  ✗ $SOURCE_IMG (not found)"
@@ -283,7 +305,7 @@ cmd_status() {
 
   if [ -f "$BACKUP_IMG" ]; then
     local bak_size
-    bak_size=$(du -h "$BACKUP_IMG" | cut -f1)
+    bak_size=$(du -h --apparent-size "$BACKUP_IMG" | cut -f1)
     echo "  ✓ $BACKUP_IMG ($bak_size)"
   else
     echo "  ✗ $BACKUP_IMG (not found)"
@@ -365,14 +387,16 @@ cmd_status() {
 # SUBCOMMAND: populate
 # ============================================================================
 cmd_populate() {
-  if ! mountpoint -q "$SOURCE_MNT/@data" 2>/dev/null; then
-    error "@data is not mounted. Run 'setup' first."
+  # NOTE: @data is a btrfs *subvolume*, not a separate mount entry, so
+  # `mountpoint @data` is unreliable. Check the real mount + the subvol dir.
+  if ! mountpoint -q "$SOURCE_MNT" 2>/dev/null || [ ! -d "$SOURCE_MNT/@data" ]; then
+    error "@data is not available. Run 'setup' first."
   fi
 
   info "Adding new batch of test data to @data..."
   local batch_name
   batch_name=$(date +%Y%m%d_%H%M%S)
-  populate_data "$SOURCE_MNT/@data" "$batch_name"
+  populate_data "$SOURCE_MNT/@data" "$batch_name" small
   ok "batch added: $batch_name"
 }
 
