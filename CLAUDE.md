@@ -171,16 +171,28 @@ Non-obvious correctness rules carried from btrbk (details + citations in the doc
 
 Diagnostic logging uses the `log` facade in `application` and `adapters` only
 (`domain` stays log-free to preserve purity). The CLI composition root initializes
-`env_logger` from `RUST_LOG` (default `info`). Level convention:
+dual-target logging: **errors/warnings go to stderr (with color), info/debug go to
+a log file**. This matches standard backup-tool UX (btrbk, rsync, borg): critical
+issues are always visible, even with `--quiet`, while progress/info output can be
+suppressed for cron/scripting.
+
+**Output routing:**
+- `error` (red) & `warn` (yellow) → stderr (always, even with `--quiet`)
+- `info` & `debug` → file (suppressed with `--quiet`)
+- Default file: `/var/log/mybtrfs.log` or `~/.local/share/mybtrfs/logs/mybtrfs.log`
+- Override with `--log-file <PATH>`; use `/dev/null` to discard
+
+**Level convention:**
 - `error` — invariant violated, operation cannot continue
-- `warn` — garbled receive detected, path skipped, safety anchor triggered
+- `warn` — garbled receive detected, path skipped, safety anchor triggered, cleanup failed
 - `info` — each major step (snapshot, transfer, prune, delete, restore)
 - `debug` — btrfs commands spawned, name collision resolution, decisions within a step
 - `trace` — per-item iteration, path filtering
 
 Every adapter method spawning a btrfs command must emit `log::debug!` before the
-spawn. Every `PortError::Verification` returned must have a `log::error!` at the
-detection site. Capture the full trace with `RUST_LOG=debug mybtrfs … 2>debug.log`.
+spawn. Every `PortError::Verification` / `PortError::Command` returned must have a
+`log::error!` or `log::warn!` at the detection site. Capture the full trace with
+`RUST_LOG=debug mybtrfs …` (stderr for warnings/errors, file for info/debug).
 
 ## Intentional divergences from btrbk
 

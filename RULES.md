@@ -64,8 +64,10 @@ in `CLAUDE.md` § "Invariants any implementation MUST preserve" and `02` §6.
 ## Logging
 
 22. **`log` crate only in `application` and `adapters`** — never in `domain` (breaks
-    purity). The CLI composition root wires `env_logger` once (with `RUST_LOG` and
-    default `info`); no other crate may initialize a subscriber.
+    purity). The CLI composition root wires dual-target `env_logger`: errors/warnings
+    to stderr (red/yellow), info/debug to log file. This ensures critical issues are
+    always visible (even with `--quiet`), matching standard backup-tool UX. Only one
+    logger is initialized; no other crate may call `log::set_*`.
 23. **Level convention**: `error` — invariant violated / operation cannot continue;
     `warn` — surprising but recoverable (garbled receive, path skipped, force-preserve
     triggered); `info` — each major step (snapshot created, transfer started/completed,
