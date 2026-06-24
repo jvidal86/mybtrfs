@@ -267,7 +267,7 @@ pub(crate) fn parse_filesystem_uuid(output: &str) -> Result<Uuid, PortError> {
 /// Parse the "Referenced:" byte count from `btrfs subvolume show` output.
 ///
 /// The field looks like `    Referenced:         1.23GiB` (using btrfs-progs'
-/// human-readable units: B, KiB, MiB, GiB, TiB, EiB). A missing or malformed
+/// human-readable units: B, KiB, MiB, GiB, TiB, PiB, EiB). A missing or malformed
 /// field is a parse **error** (rule 16): callers need a real byte count, not 0.
 ///
 /// # Errors
@@ -338,7 +338,8 @@ fn parse_btrfs_size(s: &str) -> Option<u64> {
         "MiB" => 1024.0 * 1024.0,
         "GiB" => 1024.0 * 1024.0 * 1024.0,
         "TiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
-        "EiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "PiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "EiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
         _ => return None,
     };
     Some((num * multiplier) as u64)
@@ -654,6 +655,20 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
         let output = "    Referenced:           4.00KiB\n";
         let bytes = parse_referenced_bytes(output).unwrap();
         assert_eq!(bytes, 4 * 1024);
+    }
+
+    #[test]
+    fn referenced_bytes_parses_pib() {
+        let output = "    Referenced:           1.00PiB\n";
+        let bytes = parse_referenced_bytes(output).unwrap();
+        assert_eq!(bytes, 1024u64 * 1024 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn referenced_bytes_parses_eib() {
+        let output = "    Referenced:           1.00EiB\n";
+        let bytes = parse_referenced_bytes(output).unwrap();
+        assert_eq!(bytes, 1024u64 * 1024 * 1024 * 1024 * 1024 * 1024);
     }
 
     #[test]

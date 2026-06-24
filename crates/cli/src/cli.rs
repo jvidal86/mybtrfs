@@ -915,7 +915,13 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let older_sub = btrfs.show(&older_snapshot)?;
             let older_bytes = btrfs.referenced_bytes(&older_snapshot)?;
             let newer_bytes = btrfs.referenced_bytes(&newer_snapshot)?;
-            let changed_bytes = btrfs.find_new_changed_bytes(&newer_snapshot, older_sub.cgen)?;
+            // Use `generation + 1` as the since_gen argument, matching btrbk's
+            // `find-new` usage (btrbk line 5561). Even for read-only snapshots
+            // `gen` can exceed `cgen` by 1 (btrbk source comment: "in some cases
+            // cgen differs from gen, even for read-only snapshots"), so `cgen`
+            // would miss those extents.
+            let changed_bytes = btrfs
+                .find_new_changed_bytes(&newer_snapshot, older_sub.generation.saturating_add(1))?;
 
             let diff = DiffService::estimate_changes(
                 older_bytes,
