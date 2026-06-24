@@ -34,26 +34,12 @@ use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
 
-/// Default log path with fallback: try /var/log/mybtrfs.log, fall back to
-/// ~/.local/share/mybtrfs/logs/mybtrfs.log if the first is not writable.
+/// Default log path: `/var/log/mybtrfs.log`.
+///
+/// The directory is created by [`setup_dual_target_logger`] if it does not exist.
+/// The tool requires root for all btrfs operations, so `/var/log` is always writable.
 fn default_log_path() -> Option<PathBuf> {
-    let var_log = PathBuf::from("/var/log/mybtrfs.log");
-    // Check if /var/log is writable by attempting to open the file
-    use std::fs::OpenOptions;
-    if OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&var_log)
-        .is_ok()
-    {
-        return Some(var_log);
-    }
-    // Fall back to ~/.local/share/mybtrfs/logs/
-    if let Ok(home) = std::env::var("HOME") {
-        let fallback = PathBuf::from(home).join(".local/share/mybtrfs/logs/mybtrfs.log");
-        return Some(fallback);
-    }
-    None
+    Some(PathBuf::from("/var/log/mybtrfs.log"))
 }
 
 /// Initialize dual-target logging: errors/warnings to stderr (with color),

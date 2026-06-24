@@ -44,7 +44,7 @@ A second run that finds the lock held exits immediately with code 3.
 .TP
 .BR \-\-log-file " \fIPATH\fR"
 Write logs to a file instead of stderr (frees stderr for progress indicators).
-Default: \fI/var/log/mybtrfs.log\fR (or \fI~/.local/share/mybtrfs/logs/mybtrfs.log\fR if not writable).
+Default: \fI/var/log/mybtrfs.log\fR (created if it does not exist; the tool requires root).
 Use \fI/dev/null\fR to suppress logging.
 .TP
 .B \-h, \-\-help

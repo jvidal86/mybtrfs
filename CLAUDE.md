@@ -185,7 +185,7 @@ suppressed for cron/scripting.
 **Output routing:**
 - `error` (red) & `warn` (yellow) → stderr (always, even with `--quiet`)
 - `info` & `debug` → file (suppressed with `--quiet`)
-- Default file: `/var/log/mybtrfs.log` or `~/.local/share/mybtrfs/logs/mybtrfs.log`
+- Default file: `/var/log/mybtrfs.log` (created if absent; tool requires root)
 - Override with `--log-file <PATH>`; use `/dev/null` to discard
 
 **Level convention:**
