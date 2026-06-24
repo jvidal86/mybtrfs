@@ -49,6 +49,12 @@ endpoints, validated end-to-end against a real host
 remaining Phase 5 items (raw/encrypted targets, an optional backup-set file) are
 design-only (`08`/`09`), needing real infra (GPG) to validate.
 
+**Manual testing:** a persistent local btrfs environment is available via
+`contrib/setup-local-backup-env.sh` — creates two loopback filesystems (source +
+backup) with real btrfs subvolumes, survives reboots, and can be torn down cleanly.
+Use this to test backup/restore workflows interactively without requiring CI or a
+real external drive. See `contrib/README.md` for usage.
+
 ## Workspace layout — the dependency rule is compiler-enforced
 
 Hexagonal layering as separate crates; dependencies point **inward**
