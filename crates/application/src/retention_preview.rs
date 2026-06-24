@@ -7,11 +7,11 @@ use chrono::Local;
 use mybtrfs_domain::model::Subvolume;
 use mybtrfs_domain::naming::parse_name;
 use mybtrfs_domain::retention::Schedule;
-use std::path::PathBuf;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// Helper: construct a mock Subvolume for testing.
     fn mock_snapshot(name: &str, id: u64) -> Subvolume {
@@ -51,7 +51,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify output contains "data.20260624T143210" (today)
