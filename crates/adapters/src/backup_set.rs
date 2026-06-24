@@ -247,15 +247,42 @@ target_preserve_daily = 30
     }
 
     #[test]
-    fn missing_required_field_errors() {
+    fn missing_basename_errors() {
         let toml = r#"
 [[backup]]
 source = "/data"
 snapshot_dir = "/snapshots"
+target_dir = "/backup"
 "#;
 
         let err = parse_backup_set(toml).unwrap_err();
         assert!(err.contains("basename"));
+    }
+
+    #[test]
+    fn missing_snapshot_dir_errors() {
+        let toml = r#"
+[[backup]]
+source = "/data"
+basename = "data"
+target_dir = "/backup"
+"#;
+
+        let err = parse_backup_set(toml).unwrap_err();
+        assert!(err.contains("snapshot_dir"));
+    }
+
+    #[test]
+    fn missing_target_dir_errors() {
+        let toml = r#"
+[[backup]]
+source = "/data"
+snapshot_dir = "/snapshots"
+basename = "data"
+"#;
+
+        let err = parse_backup_set(toml).unwrap_err();
+        assert!(err.contains("target_dir"));
     }
 
     #[test]
