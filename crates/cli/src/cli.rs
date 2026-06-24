@@ -30,6 +30,29 @@ use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
 
+/// Default log path with fallback: try /var/log/mybtrfs.log, fall back to
+/// ~/.local/share/mybtrfs/logs/mybtrfs.log if the first is not writable.
+fn default_log_path() -> Option<PathBuf> {
+    let var_log = PathBuf::from("/var/log/mybtrfs.log");
+    // Check if /var/log is writable by attempting to open the file
+    use std::fs::OpenOptions;
+    if OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&var_log)
+        .is_ok()
+    {
+        return Some(var_log);
+    }
+    // Fall back to ~/.local/share/mybtrfs/logs/
+    if let Ok(home) = std::env::var("HOME") {
+        let fallback = PathBuf::from(home)
+            .join(".local/share/mybtrfs/logs/mybtrfs.log");
+        return Some(fallback);
+    }
+    None
+}
+
 /// Process exit codes (central table — RULES rule 14). Intentional divergence from btrbk:
 /// adds code 4 for permission errors for better UX in scripts/cron.
 mod exit_code {
@@ -149,7 +172,8 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     lock: Option<PathBuf>,
     /// Write logs to a file instead of stderr (frees stderr for progress indicators).
-    /// Use with `lnav` for log viewing: `lnav /path/to/logfile`.
+    /// Default: /var/log/mybtrfs.log (or ~/.local/share/mybtrfs/logs if not writable).
+    /// Use `--log-file /dev/null` to suppress logging. View with: `lnav <path>`.
     #[arg(long, global = true, value_name = "PATH")]
     log_file: Option<PathBuf>,
 }
@@ -310,10 +334,20 @@ fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
 
-    // Initialize logging: to file (if --log-file) or stderr (default).
+    // Initialize logging to a file by default (fallback strategy):
+    // Try /var/log/mybtrfs.log first, fall back to ~/.local/share/mybtrfs/logs/ if not writable.
+    // --log-file overrides; use /dev/null to suppress.
     let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if let Some(ref log_file) = cli.log_file {
+    let log_path = cli.log_file.clone().or_else(|| default_log_path());
+
+    if let Some(ref log_file) = log_path {
         use std::fs::OpenOptions;
+        // Ensure parent directory exists
+        if let Some(parent) = log_file.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
         match OpenOptions::new()
             .create(true)
             .append(true)
