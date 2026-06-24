@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use std::sync::Arc;
 
+use chrono::{DateTime, FixedOffset};
 use mybtrfs_adapters::{
     AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, IndicatifProgress,
     LocalFsAdapter, LsblkDriveDiscovery, StdioPrompter, SystemClock, parse_endpoint,
@@ -985,7 +986,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 )
             }
             .context("prune failed")?;
-            print_prune_report(&report, *dry_run);
+            print_prune_report(&report, *dry_run, clock.now());
             Ok(())
         }
     }
@@ -1282,17 +1283,19 @@ fn print_resume_report(report: &ResumeReport) {
     );
 }
 
-/// Print a one-fact-per-line summary of a standalone prune. On a dry run the
-/// counts describe what *would* be deleted (the per-path lines came from the
-/// dry-run delete port).
-fn print_prune_report(report: &PruneReport, dry_run: bool) {
+/// Print a prune report. In dry-run mode, shows a human-readable keep/delete
+/// preview (via `retention_preview::format_schedule`); otherwise a one-line
+/// machine-readable summary of how many were actually deleted.
+fn print_prune_report(report: &PruneReport, dry_run: bool, now: DateTime<FixedOffset>) {
     if dry_run {
-        for line in retention_preview::format_schedule(&report.snapshots_pruned).lines() {
-            println!("snapshot\t{}", line);
-        }
-        for line in retention_preview::format_schedule(&report.backups_pruned).lines() {
-            println!("backup\t{}", line);
-        }
+        print!(
+            "{}",
+            retention_preview::format_schedule(&report.snapshots_pruned, "snapshots", now)
+        );
+        print!(
+            "{}",
+            retention_preview::format_schedule(&report.backups_pruned, "backups", now)
+        );
     } else {
         println!(
             "pruned\t{}\t{}",

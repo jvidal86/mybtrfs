@@ -1,133 +1,137 @@
-//! Retention preview — output what `prune` would delete before it runs.
+//! Retention preview — format what `prune --dry-run` would keep and delete.
 //!
-//! Tab-separated format (action, name, age) for easy parsing with grep/awk.
-//! No decorative elements; output designed for scripting.
+//! Human-readable output with clear KEEP / DELETE sections, counts, and ages.
+//! The clock is injected (`now: DateTime<FixedOffset>`) so output is
+//! deterministic and fully unit-testable without ambient system time (rule 6).
 
-use chrono::Local;
+use chrono::{DateTime, FixedOffset};
+
 use mybtrfs_domain::model::Subvolume;
 use mybtrfs_domain::naming::parse_name;
 use mybtrfs_domain::retention::Schedule;
 
-// ============================================================================
-// Implementation
-// ============================================================================
-
-/// Format a retention `Schedule<T>` as tab-separated output.
-/// Output: action (preserve/delete), snapshot name, age.
-/// No header row; designed for grep/awk parsing.
+/// Format a retention [`Schedule<Subvolume>`] as a human-readable preview.
+///
+/// Output has two sections — KEEP and DELETE — each listing snapshot names
+/// and their ages relative to `now`. When the delete list is empty the DELETE
+/// section says "nothing to delete". No emoji or terminal escapes; plain text
+/// suitable for pipes and log files.
 ///
 /// # Arguments
-/// * `schedule` — the computed schedule (preserve/delete partitions)
-///
-/// # Returns
-/// Tab-separated lines: `action\tname\tage`.
+/// * `schedule` — the computed schedule (preserve / delete partitions)
+/// * `label`    — section label prefix (e.g. `"snapshots"`, `"backups"`)
+/// * `now`      — injected current time (deterministic, from the `ClockPort`)
 #[must_use]
-pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
-    let now = Local::now();
-    let mut output = String::new();
+pub fn format_schedule(
+    schedule: &Schedule<Subvolume>,
+    label: &str,
+    now: DateTime<FixedOffset>,
+) -> String {
+    let mut out = String::new();
 
-    use std::ffi::OsStr;
-
-    // PRESERVE rows
-    for sv in &schedule.preserve {
-        let name = sv
-            .path
-            .file_name()
-            .and_then(|n: &OsStr| n.to_str())
-            .unwrap_or("?");
-        let age = compute_age(name, &now);
-        output.push_str("preserve\t");
-        output.push_str(name);
-        output.push('\t');
-        output.push_str(&age);
-        output.push('\n');
+    // KEEP section
+    out.push_str(&format!(
+        "{} KEEP ({}):\n",
+        label.to_uppercase(),
+        count_label(schedule.preserve.len())
+    ));
+    if schedule.preserve.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for sv in &schedule.preserve {
+            let name = snapshot_name(sv);
+            let age = age_string(name, now);
+            out.push_str(&format!("  keep  {name}  [{age}]\n"));
+        }
     }
 
-    // DELETE rows
-    for sv in &schedule.delete {
-        let name = sv
-            .path
-            .file_name()
-            .and_then(|n: &OsStr| n.to_str())
-            .unwrap_or("?");
-        let age = compute_age(name, &now);
-        output.push_str("delete\t");
-        output.push_str(name);
-        output.push('\t');
-        output.push_str(&age);
-        output.push('\n');
+    // DELETE section
+    out.push_str(&format!(
+        "{} DELETE ({}):\n",
+        label.to_uppercase(),
+        count_label(schedule.delete.len())
+    ));
+    if schedule.delete.is_empty() {
+        out.push_str("  (nothing to delete)\n");
+    } else {
+        for sv in &schedule.delete {
+            let name = snapshot_name(sv);
+            let age = age_string(name, now);
+            out.push_str(&format!("  delete  {name}  [{age}]\n"));
+        }
     }
 
-    output
+    out
 }
 
-/// Parse a snapshot name (ISO timestamp) and compute age relative to "now".
+/// Compute a human-readable age string for a snapshot name at `now`.
 ///
-/// Parses the ISO timestamp from the snapshot basename (e.g., "data.20260624T143210")
-/// and computes a human-readable age like "7 days ago" or "2 hours ago".
-///
-/// # Arguments
-/// * `name` — snapshot basename (e.g., "data.20260624T143210")
-/// * `now` — current time (injected, chrono::DateTime<Local>)
-///
-/// # Returns
-/// A human-readable age string (e.g., "7 days ago", "2 hours ago").
-/// If the name doesn't parse, returns a placeholder like "unknown age".
+/// Parses the ISO timestamp from the snapshot basename (e.g.
+/// `"data.20260624T143210"`) and returns a phrase like `"3 days ago"` or
+/// `"2 hours ago"`. Returns `"unknown age"` if the name cannot be parsed.
 #[must_use]
-pub fn compute_age(name: &str, now: &chrono::DateTime<Local>) -> String {
-    // Try to parse the name and extract its timestamp.
-    if let Some(parsed) = parse_name(name) {
-        // parsed.naive is a NaiveDateTime representing when the snapshot was created.
-        // Treat it as local time in the same timezone as "now".
-        let snap_local = parsed.naive.and_local_timezone(now.timezone()).single();
+pub fn age_string(name: &str, now: DateTime<FixedOffset>) -> String {
+    let Some(parsed) = parse_name(name) else {
+        return "unknown age".to_owned();
+    };
+    let snap_dt = match parsed.naive.and_local_timezone(now.timezone()).single() {
+        Some(dt) => dt,
+        None => return "unknown age".to_owned(),
+    };
+    let secs = now.signed_duration_since(snap_dt).num_seconds().max(0) as u64;
 
-        if let Some(snap_dt) = snap_local {
-            let duration = now.signed_duration_since(snap_dt);
-            let secs = duration.num_seconds() as u64;
-
-            if secs < 60 {
-                "just now".to_string()
-            } else if secs < 3600 {
-                let mins = secs / 60;
-                if mins == 1 {
-                    "1 minute ago".to_string()
-                } else {
-                    format!("{} minutes ago", mins)
-                }
-            } else if secs < 86400 {
-                let hours = secs / 3600;
-                if hours == 1 {
-                    "1 hour ago".to_string()
-                } else {
-                    format!("{} hours ago", hours)
-                }
-            } else {
-                let days = secs / 86400;
-                if days == 1 {
-                    "1 day ago".to_string()
-                } else {
-                    format!("{} days ago", days)
-                }
-            }
-        } else {
-            "unknown age".to_string()
-        }
+    if secs < 60 {
+        "just now".to_owned()
+    } else if secs < 3_600 {
+        plural(secs / 60, "minute")
+    } else if secs < 86_400 {
+        plural(secs / 3_600, "hour")
     } else {
-        "unknown age".to_string()
+        plural(secs / 86_400, "day")
+    }
+}
+
+fn snapshot_name(sv: &Subvolume) -> &str {
+    sv.path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+}
+
+fn plural(n: u64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{n} {unit}s ago")
+    }
+}
+
+fn count_label(n: usize) -> String {
+    if n == 1 {
+        "1 snapshot".to_owned()
+    } else {
+        format!("{n} snapshots")
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
 
-    /// Helper: construct a mock Subvolume for testing.
-    fn mock_snapshot(name: &str, id: u64) -> Subvolume {
-        use mybtrfs_domain::model::Uuid;
+    use chrono::TimeZone;
+
+    use mybtrfs_domain::model::Uuid;
+
+    use super::*;
+
+    /// Fixed "now" for deterministic tests: 2026-06-24T14:32:10+00:00
+    fn fixed_now() -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 24, 14, 32, 10)
+            .unwrap()
+    }
+
+    fn mock_sv(name: &str, id: u64) -> Subvolume {
         let uuid_str = format!("{:08x}-0000-0000-0000-000000000000", id);
-        let fs_uuid_str = "12345678-1234-1234-1234-123456789012";
         Subvolume {
             id,
             uuid: Uuid::parse(&uuid_str),
@@ -138,210 +142,194 @@ mod tests {
             generation: 0,
             cgen: 0,
             readonly: true,
-            fs_uuid: Uuid::parse(fs_uuid_str).expect("valid test uuid"),
+            fs_uuid: Uuid::parse("12345678-1234-1234-1234-123456789012").expect("valid uuid"),
         }
     }
 
-    /// **TEST: format_preserve_list renders snapshot names clearly**
-    ///
-    /// Given a preserve list with 3 snapshots of different ages,
-    /// When formatted as a preview list,
-    /// Then output shows names + parsed ages (via naming parser).
+    // ── age_string ────────────────────────────────────────────────────────────
+
     #[test]
-    fn format_preserve_list_shows_names_and_ages() {
-        // Arrange
-        let preserve = vec![
-            mock_snapshot("data.20260624T143210", 1),
-            mock_snapshot("data.20260623T143210", 2),
-            mock_snapshot("data.20260622T143210", 3),
-        ];
+    fn age_string_just_now() {
+        // snapshot at exactly now (long format = Thhmm)
+        let age = age_string("data.20260624T1432", fixed_now());
+        assert_eq!(age, "just now");
+    }
+
+    #[test]
+    fn age_string_minutes() {
+        // snapshot 30 minutes before now (14:02)
+        let age = age_string("data.20260624T1402", fixed_now());
+        assert_eq!(age, "30 minutes ago");
+    }
+
+    #[test]
+    fn age_string_one_hour() {
+        // snapshot 1 hour before now (13:32)
+        let age = age_string("data.20260624T1332", fixed_now());
+        assert_eq!(age, "1 hour ago");
+    }
+
+    #[test]
+    fn age_string_hours() {
+        // snapshot 3 hours before now (11:32)
+        let age = age_string("data.20260624T1132", fixed_now());
+        assert_eq!(age, "3 hours ago");
+    }
+
+    #[test]
+    fn age_string_one_day() {
+        // snapshot 1 day before now (2026-06-23T14:32)
+        let age = age_string("data.20260623T1432", fixed_now());
+        assert_eq!(age, "1 day ago");
+    }
+
+    #[test]
+    fn age_string_many_days() {
+        // snapshot 7 days before now (2026-06-17T14:32)
+        let age = age_string("data.20260617T1432", fixed_now());
+        assert_eq!(age, "7 days ago");
+    }
+
+    #[test]
+    fn age_string_unknown_for_unparseable_name() {
+        let age = age_string("not-a-snapshot-name", fixed_now());
+        assert_eq!(age, "unknown age");
+    }
+
+    // ── format_schedule ───────────────────────────────────────────────────────
+
+    #[test]
+    fn format_schedule_keep_section_lists_names_and_ages() {
         let schedule = Schedule {
-            preserve,
+            preserve: vec![
+                mock_sv("data.20260624T1432", 1), // just now
+                mock_sv("data.20260623T1432", 2), // 1 day ago
+            ],
             delete: vec![],
         };
+        let out = format_schedule(&schedule, "snapshots", fixed_now());
 
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify output contains "data.20260624T143210" (today)
-        // TODO: verify output contains "data.20260623T143210" (1 day ago)
-        // TODO: verify output contains "PRESERVE" header
-        // TODO: verify output contains count "(3 snapshots)"
-    }
-
-    /// **TEST: format_delete_list highlights snapshots to be removed**
-    ///
-    /// Given a delete list with 2 old snapshots,
-    /// When formatted,
-    /// Then output shows DELETE section with warning icon + names + ages.
-    #[test]
-    fn format_delete_list_shows_removal_candidates() {
-        // Arrange
-        let delete = vec![
-            mock_snapshot("data.20260617T143210", 10),
-            mock_snapshot("data.20260610T143210", 11),
-        ];
-        let schedule = Schedule {
-            preserve: vec![],
-            delete,
-        };
-
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify output contains "DELETE" header
-        // TODO: verify output contains warning icon (⚠️)
-        // TODO: verify output contains "(2 snapshots)" count
-        // TODO: verify output contains both snapshot names
-        // TODO: verify output includes "run with --yes to confirm" disclaimer
-    }
-
-    /// **TEST: format_schedule separates preserve and delete clearly**
-    ///
-    /// Given a mixed schedule (both preserve and delete partitions),
-    /// When formatted,
-    /// Then sections are visually distinct and both counts match inputs.
-    #[test]
-    fn format_schedule_partitions_preserve_vs_delete() {
-        // Arrange
-        let preserve = vec![
-            mock_snapshot("data.20260624T143210", 1),
-            mock_snapshot("data.20260623T143210", 2),
-        ];
-        let delete = vec![mock_snapshot("data.20260610T143210", 11)];
-        let schedule = Schedule {
-            preserve: preserve.clone(),
-            delete: delete.clone(),
-        };
-
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify PRESERVE section appears before DELETE section
-        // TODO: verify "2 snapshots" in PRESERVE count
-        // TODO: verify "1 snapshot" in DELETE count
-        // TODO: verify both snapshot names are present
-    }
-
-    /// **TEST: empty preserve list (all deleted) is handled**
-    ///
-    /// Edge case: aggressive retention policy deletes everything except the latest.
-    /// Format should still work (unusual but valid).
-    #[test]
-    fn format_schedule_with_empty_preserve() {
-        // Arrange
-        let delete = vec![
-            mock_snapshot("data.20260623T143210", 2),
-            mock_snapshot("data.20260622T143210", 3),
-        ];
-        let schedule = Schedule {
-            preserve: vec![],
-            delete,
-        };
-
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify PRESERVE section shows "(0 snapshots)" or is omitted gracefully
-        // TODO: verify DELETE section is still present and correct
-        // TODO: verify output doesn't panic or produce malformed text
-    }
-
-    /// **TEST: empty delete list (no pruning needed) is handled**
-    ///
-    /// Edge case: all snapshots within retention policy.
-    #[test]
-    fn format_schedule_with_empty_delete() {
-        // Arrange
-        let preserve = vec![
-            mock_snapshot("data.20260624T143210", 1),
-            mock_snapshot("data.20260623T143210", 2),
-        ];
-        let schedule = Schedule {
-            preserve,
-            delete: vec![],
-        };
-
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify PRESERVE section shows both snapshots
-        // TODO: verify DELETE section shows "(0 snapshots)" or is omitted
-        // TODO: verify no "run with --yes to confirm" disclaimer (nothing to confirm)
-        // TODO: verify output is clear that no action needed
-    }
-
-    /// **TEST: snapshot names with special characters are escaped/quoted**
-    ///
-    /// Edge case: snapshot names containing spaces, slashes, or other chars.
-    /// Format must handle gracefully.
-    #[test]
-    fn format_schedule_handles_special_chars_in_names() {
-        // Arrange
-        let preserve = vec![mock_snapshot("data.with-dash.20260624T143210", 1)];
-        let schedule = Schedule {
-            preserve,
-            delete: vec![],
-        };
-
-        // Act
-        let _output = format_schedule(&schedule);
-
-        // Assert
-        // TODO: verify snapshot name is present and readable in output
-        // TODO: verify output is valid UTF-8 and doesn't contain unescaped control chars
-    }
-
-    /// **TEST: age calculation (e.g., "7 days ago") formats correctly**
-    ///
-    /// Snapshot names contain ISO timestamps; formatter parses them and computes age.
-    #[test]
-    #[ignore] // parsing age from snapshot name is system-dependent; defer to E2E test
-    fn format_schedule_computes_age_from_snapshot_timestamp() {
-        // Arrange
-        let now = Local::now();
-
-        // Act
-        let age = compute_age("data.20260617T143210", &now);
-
-        // Assert
-        // Verify the age string is a reasonable format (not "unknown age" means parse worked)
-        // and contains temporal words.
-        assert!(!age.is_empty(), "age string should not be empty");
         assert!(
-            age.contains("ago") || age.contains("just"),
-            "Expected age format like 'X days ago', got: {}",
-            age
+            out.contains("SNAPSHOTS KEEP (2 snapshots)"),
+            "missing keep header: {out}"
+        );
+        assert!(
+            out.contains("keep  data.20260624T1432"),
+            "missing keep entry 1: {out}"
+        );
+        assert!(
+            out.contains("keep  data.20260623T1432"),
+            "missing keep entry 2: {out}"
+        );
+        assert!(out.contains("[just now]"), "missing age for today: {out}");
+        assert!(
+            out.contains("[1 day ago]"),
+            "missing age for yesterday: {out}"
         );
     }
 
-    /// **TEST: format output is stable (no randomness, deterministic)**
-    ///
-    /// Same input schedule should produce identical output every time.
-    /// Important for testing and reproducibility.
+    #[test]
+    fn format_schedule_delete_section_lists_names_and_ages() {
+        let schedule = Schedule {
+            preserve: vec![mock_sv("data.20260624T1432", 1)],
+            delete: vec![
+                mock_sv("data.20260617T1432", 10), // 7 days ago
+                mock_sv("data.20260610T1432", 11), // 14 days ago
+            ],
+        };
+        let out = format_schedule(&schedule, "snapshots", fixed_now());
+
+        assert!(
+            out.contains("SNAPSHOTS DELETE (2 snapshots)"),
+            "missing delete header: {out}"
+        );
+        assert!(
+            out.contains("delete  data.20260617T1432"),
+            "missing delete entry 1: {out}"
+        );
+        assert!(
+            out.contains("delete  data.20260610T1432"),
+            "missing delete entry 2: {out}"
+        );
+        assert!(out.contains("[7 days ago]"), "missing age 7d: {out}");
+        assert!(out.contains("[14 days ago]"), "missing age 14d: {out}");
+    }
+
+    #[test]
+    fn format_schedule_empty_delete_shows_nothing_to_delete() {
+        let schedule = Schedule {
+            preserve: vec![mock_sv("data.20260624T1432", 1)],
+            delete: vec![],
+        };
+        let out = format_schedule(&schedule, "snapshots", fixed_now());
+
+        assert!(
+            out.contains("(nothing to delete)"),
+            "missing nothing-to-delete: {out}"
+        );
+        assert!(
+            !out.contains("delete  "),
+            "no delete entries expected: {out}"
+        );
+    }
+
+    #[test]
+    fn format_schedule_empty_preserve_shows_none() {
+        let schedule = Schedule {
+            preserve: vec![],
+            delete: vec![mock_sv("data.20260617T1432", 10)],
+        };
+        let out = format_schedule(&schedule, "snapshots", fixed_now());
+
+        assert!(out.contains("(none)"), "missing none placeholder: {out}");
+        assert!(
+            out.contains("delete  data.20260617T1432"),
+            "missing delete entry: {out}"
+        );
+    }
+
+    #[test]
+    fn format_schedule_uses_label_as_section_prefix() {
+        let schedule = Schedule {
+            preserve: vec![],
+            delete: vec![],
+        };
+        let snap_out = format_schedule(&schedule, "snapshots", fixed_now());
+        let back_out = format_schedule(&schedule, "backups", fixed_now());
+
+        assert!(
+            snap_out.contains("SNAPSHOTS KEEP"),
+            "snapshot label: {snap_out}"
+        );
+        assert!(
+            back_out.contains("BACKUPS KEEP"),
+            "backup label: {back_out}"
+        );
+    }
+
+    #[test]
+    fn format_schedule_singular_count_label() {
+        let schedule = Schedule {
+            preserve: vec![mock_sv("data.20260624T1432", 1)],
+            delete: vec![mock_sv("data.20260617T1432", 2)],
+        };
+        let out = format_schedule(&schedule, "snapshots", fixed_now());
+
+        assert!(out.contains("KEEP (1 snapshot)"), "singular keep: {out}");
+        assert!(
+            out.contains("DELETE (1 snapshot)"),
+            "singular delete: {out}"
+        );
+    }
+
     #[test]
     fn format_schedule_is_deterministic() {
-        // Arrange
-        let preserve = vec![
-            mock_snapshot("data.20260624T143210", 1),
-            mock_snapshot("data.20260623T143210", 2),
-        ];
-        let delete = vec![mock_snapshot("data.20260610T143210", 11)];
         let schedule = Schedule {
-            preserve: preserve.clone(),
-            delete: delete.clone(),
+            preserve: vec![mock_sv("data.20260624T1432", 1)],
+            delete: vec![mock_sv("data.20260617T1432", 2)],
         };
-
-        // Act
-        let output1 = format_schedule(&schedule);
-        let output2 = format_schedule(&schedule);
-
-        // Assert
-        assert_eq!(output1, output2, "format output must be deterministic");
+        let out1 = format_schedule(&schedule, "snapshots", fixed_now());
+        let out2 = format_schedule(&schedule, "snapshots", fixed_now());
+        assert_eq!(out1, out2);
     }
 }
