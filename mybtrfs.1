@@ -1,0 +1,502 @@
+.TH MYBTRFS 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs \- btrfs-native incremental backup tool (a Rust reimagining of btrbk)
+
+.SH SYNOPSIS
+.B mybtrfs
+[\fIOPTIONS\fR] \fICOMMAND\fR [\fICOMMAND_OPTIONS\fR]
+
+.SH DESCRIPTION
+.B mybtrfs
+is a modern backup tool for btrfs subvolumes, written in Rust as a drop-in
+alternative to btrbk. It provides atomic read-only snapshots, incremental
+send/receive, and automated retention policies with a simpler CLI-first interface.
+
+.B Key features:
+.RS
+.IP \(bu 2
+Incremental backups via btrfs send/receive with UUID-based parent resolution
+.IP \(bu 2
+GFS (Grandfather-Father-Son) retention policies with dry-run preview
+.IP \(bu 2
+SSH remote support for both push and pull backups
+.IP \(bu 2
+Automatic btrfs drive discovery and selection
+.IP \(bu 2
+Safety-first: guards against common restore pitfalls (received_uuid trap,
+delete anchors, verification on transfer)
+.IP \(bu 2
+Single static binary; no Perl, Python, or runtime dependencies
+.IP \(bu 2
+Full audit trail via optional journal logging
+.IP \(bu 2
+Per-run locking to prevent concurrent execution
+.RE
+
+.B Endpoints:
+Targets can be local paths or remote SSH endpoints in the form
+\fBssh://\fR[\fIuser@\fR]\fIhost\fR[:\fIport\fR]\fI/path\fR. Remote backups are
+automatically discovered and mounted if accessible.
+
+.B Stateless and idempotent:
+Every run re-derives all subvolume relationships from live btrfs metadata
+(UUIDs, parent pointers, received_uuid state). No side database or persistent
+state files—snapshots are named with timestamps and collision counters.
+
+.SH GLOBAL OPTIONS
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations (e.g., creating missing directories).
+Suitable for non-interactive use (cron, scripts, systemd timers).
+
+.TP
+.B \-\-journal \fIPATH\fR
+Append a timestamped audit line for this invocation to the given file.
+Journal lines record the command, arguments, and success/failure state for
+auditing and observability. Journal write failures are logged but do not
+abort the command.
+
+.TP
+.B \-\-lock \fIPATH\fR
+Use the specified path as the run lock (default: \fB$TMPDIR/mybtrfs-$UID.lock\fR).
+Ensures that only one mybtrfs process runs at a time. A second run that finds
+the lock held exits immediately with code 3 (LOCK_BUSY). The lock is
+automatically released when the process exits.
+
+.TP
+.B \-\-version, \-V
+Print the version and exit.
+
+.TP
+.B \-\-help, \-h
+Print brief help and exit. Use \fBmybtrfs \fICOMMAND\fR \-\-help\fR for
+command-specific options and arguments.
+
+.SH COMMANDS
+.TP
+.B snapshot \fISOURCE SNAPSHOT_DIR BASENAME\fR
+Create a read-only snapshot of the source subvolume.
+
+.B Arguments:
+.RS
+.TP
+\fISOURCE\fR
+The source subvolume to snapshot (a btrfs subvolume path).
+
+.TP
+\fISNAPSHOT_DIR\fR
+Directory that will hold the snapshot.
+
+.TP
+\fIBASENAME\fR
+Base name for the snapshot; a timestamp (e.g., \fB20260624T123456Z\fR) and
+collision counter are appended.
+.RE
+
+.TP
+.B run \fISOURCE SNAPSHOT_DIR BASENAME\fR [\fITARGET\fR] [\fIOPTIONS\fR]
+Full backup: create a snapshot, send/receive to the target (local or remote SSH),
+then prune according to retention policy.
+
+.B Arguments:
+.RS
+.TP
+\fISOURCE\fR
+Source subvolume to back up.
+
+.TP
+\fISNAPSHOT_DIR\fR
+Directory that will hold the source-side snapshots.
+
+.TP
+\fIBASENAME\fR
+Base name for snapshots (timestamp and counter appended).
+
+.TP
+[\fITARGET\fR]
+Target for the backup: a local directory path or a remote
+\fBssh://\fR[\fIuser@\fR]\fIhost\fR[:\fIport\fR]\fI/path\fR endpoint.
+If omitted, you are prompted to select from discovered btrfs drives.
+.RE
+
+.B Options:
+.RS
+.TP
+.B \-\-incremental \fB{yes|strict|no}\fR
+Strategy for incremental send (default: \fByes\fR).
+
+.B Modes:
+.RS
+.TP
+\fByes\fR
+Use a parent snapshot if one exists; fall back to a full send if no parent is available.
+
+.TP
+\fBstrict\fR
+Require a related parent snapshot; never fall back to a full send. Useful for
+ensuring incremental-only backups in stable environments.
+
+.TP
+\fBno\fR
+Always send full; never use \fBbtrfs send \-p\fR (no parent). Slower but
+ensures independence.
+.RE
+.RE
+
+.B Retention Options:
+(See RETENTION POLICIES below)
+
+.RS
+.TP
+.B \-\-snapshot\-preserve\-min \fB{all|latest|no|<count><unit>}\fR
+Minimum keep floor for source snapshots (default: \fBall\fR).
+
+.TP
+.B \-\-snapshot\-preserve \fB"<schedule>"\fR
+Tier-based retention schedule for source snapshots
+(e.g., \fB"24h 7d 4w 6m 5y"\fR). Empty or \fBno\fR disables tiers.
+
+.TP
+.B \-\-target\-preserve\-min \fB{all|latest|no|<count><unit>}\fR
+Minimum keep floor for target backups (default: \fBall\fR).
+
+.TP
+.B \-\-target\-preserve \fB"<schedule>"\fR
+Tier-based retention schedule for target backups.
+.RE
+
+.TP
+.B resume \fISNAPSHOT_DIR BASENAME TARGET\fR [\fIOPTIONS\fR]
+Resume an incomplete backup: re-send the latest source snapshot to the target
+without creating a new snapshot. Useful if a prior backup was interrupted.
+
+.B Arguments:
+.RS
+.TP
+\fISNAPSHOT_DIR\fR
+Directory holding the source snapshots.
+
+.TP
+\fIBASENAME\fR
+Base name of the snapshot series to resume.
+
+.TP
+\fITARGET\fR
+Target directory (local or remote SSH endpoint).
+.RE
+
+.B Options:
+.RS
+.TP
+.B \-\-incremental \fB{yes|strict|no}\fR
+Same as for \fBrun\fR; default \fByes\fR.
+.RE
+
+.TP
+.B prune \fISNAPSHOT_DIR TARGET\fR [\fIOPTIONS\fR]
+Prune snapshots and backups according to retention policy without creating
+a new snapshot or transfer. Useful for cleanup and policy adjustment.
+
+.B Arguments:
+.RS
+.TP
+\fISNAPSHOT_DIR\fR
+Directory holding the source snapshots.
+
+.TP
+\fITARGET\fR
+Target directory (local or remote SSH endpoint).
+.RE
+
+.B Options:
+.RS
+.TP
+.B \-\-dry\-run
+Show what would be deleted without deleting anything. Useful for preview and
+testing.
+
+.TP
+Retention options (same as \fBrun\fR):
+.B \-\-snapshot\-preserve\-min, \-\-snapshot\-preserve,
+.B \-\-target\-preserve\-min, \-\-target\-preserve
+.RE
+
+.TP
+.B restore \fIBACKUP DEST\fR [\fIOPTIONS\fR]
+Restore a backup to a writable subvolume. If \fIDEST\fR already exists,
+it can be moved aside (with \fB\-\-force\fR) or the command can abort (default).
+
+.B Arguments:
+.RS
+.TP
+\fIBACKUP\fR
+The backup to restore (a read-only subvolume): a local path or remote
+\fBssh://\fR[\fIuser@\fR]\fIhost\fR[:\fIport\fR]\fI/path\fR source.
+
+.TP
+\fIDEST\fR
+Destination where the writable restored subvolume will be created.
+.RE
+
+.B Options:
+.RS
+.TP
+.B \-\-force
+If \fIDEST\fR exists, move it aside to \fB<dest>.broken\fR or
+\fB<dest>.broken.N\fR instead of aborting. Allows non-destructive recovery.
+
+.TP
+.B \-\-dry\-run
+Show the intended plan (move-aside + writable snapshot) without making
+any changes.
+.RE
+
+.TP
+.B list \fISNAPSHOT_DIR TARGET\fR
+List source snapshots with their correlated backups. Shows the inventory
+of all snapshots and their corresponding backups (local or remote).
+
+.B Arguments:
+.RS
+.TP
+\fISNAPSHOT_DIR\fR
+Directory holding the source snapshots.
+
+.TP
+\fITARGET\fR
+Target directory (local or remote SSH endpoint).
+.RE
+
+.TP
+.B stats \fISNAPSHOT_DIR TARGET\fR
+Show aggregate backup statistics: snapshot/backup counts, sizes, space savings
+from deduplication, and compression.
+
+.B Arguments:
+.RS
+.TP
+\fISNAPSHOT_DIR\fR
+Directory holding the source snapshots.
+
+.TP
+\fITARGET\fR
+Target directory (local or remote SSH endpoint).
+.RE
+
+.TP
+.B list\-drives
+List candidate btrfs drives for backup targets. Shows all discovered btrfs
+filesystems with their mount points and available space. Helps with drive
+auto-selection.
+
+.SH RETENTION POLICIES
+Retention policies use a btrbk-style format with two layers: a minimum-keep
+floor and tier-based schedules.
+
+.B Minimum Keep Floors:
+.RS
+.TP
+\fBall\fR
+Keep all snapshots (default).
+
+.TP
+\fBlatest\fR
+Keep only the latest snapshot (everything older is eligible for deletion).
+
+.TP
+\fBno\fR
+No minimum; all snapshots are eligible for deletion per tier rules.
+
+.TP
+\fB<count><unit>\fR
+Keep the latest \fN<count>\fR snapshots of age up to \fN<unit>\fR
+(e.g., \fB24h\fR, \fB7d\fR, \fB4w\fR, \fB6m\fR, \fB5y\fR).
+.RE
+
+.B Tier Schedules:
+A space-separated list of tiers, each \fB<count><unit>\fR. For example,
+\fB"24h 7d 4w 6m 5y"\fR keeps:
+.RS
+.IP \(bu 2
+24 hourly snapshots
+.IP \(bu 2
+7 daily snapshots
+.IP \(bu 2
+4 weekly snapshots
+.IP \(bu 2
+6 monthly snapshots
+.IP \(bu 2
+5 yearly snapshots
+.RE
+
+Empty string or \fBno\fR disables tier-based deletion (combined with the floor,
+only the minimum is preserved).
+
+.B Units:
+\fBh\fR (hour), \fBd\fR (day), \fBw\fR (week), \fBm\fR (month), \fBy\fR (year).
+
+.B Example:
+.RS
+.TP
+Keep all source snapshots but tier-prune targets to 24h / 7d / 4w:
+.B mybtrfs run /mnt/data snapshots backup ssh://remote/backups/data \e
+.B   \-\-snapshot\-preserve\-min all \e
+.B   \-\-target\-preserve\-min latest \-\-target\-preserve "24h 7d 4w"
+.RE
+
+.SH EXAMPLES
+.TP
+.B Full local backup with interactive drive selection:
+.RS
+.B mybtrfs run /mnt/data snapshots backup
+.P
+(You will be prompted to choose a local btrfs drive.)
+.RE
+
+.TP
+.B Full backup to a remote SSH endpoint with tier-based retention:
+.RS
+.B mybtrfs run /mnt/data snapshots backup ssh://backup@remote:22/backups/data \e
+.B   \-\-target\-preserve "24h 7d 4w 6m 5y"
+.RE
+
+.TP
+.B Resume an interrupted backup:
+.RS
+.B mybtrfs resume snapshots backup /mnt/backup/data
+.RE
+
+.TP
+.B Prune with dry-run to preview what would be deleted:
+.RS
+.B mybtrfs prune snapshots /mnt/backup/data \-\-dry\-run \e
+.B   \-\-target\-preserve "24h 7d 4w 6m 5y"
+.RE
+
+.TP
+.B Restore a backup to a writable snapshot:
+.RS
+.B mybtrfs restore /mnt/backup/data/backup_20260101T000000Z /mnt/restore
+.RE
+
+.TP
+.B Restore from a remote SSH backup:
+.RS
+.B mybtrfs restore ssh://backup@remote/backups/data/backup_20260101T000000Z \e
+.B   /mnt/restore
+.RE
+
+.TP
+.B List all snapshots and their backups:
+.RS
+.B mybtrfs list snapshots /mnt/backup/data
+.RE
+
+.TP
+.B Show backup statistics:
+.RS
+.B mybtrfs stats snapshots /mnt/backup/data
+.RE
+
+.TP
+.B Non-interactive cron backup with audit trail:
+.RS
+.B mybtrfs run /mnt/data snapshots backup \e
+.B   \-\-yes \e
+.B   \-\-journal /var/log/mybtrfs-audit.log \e
+.B   \-\-lock /run/mybtrfs.lock
+.RE
+
+.TP
+.B List available backup drives:
+.RS
+.B mybtrfs list\-drives
+.RE
+
+.SH EXIT CODES
+.TP
+.B 0
+Success.
+
+.TP
+.B 1
+Generic failure (command failed, subvolume not found, send/receive error, etc.).
+
+.TP
+.B 2
+Usage error (bad arguments, invalid retention policy, malformed SSH endpoint, etc.).
+
+.TP
+.B 3
+Lock busy: another mybtrfs process is already running (lock held).
+
+.TP
+.B 4
+Permission denied: the command requires root (btrfs operations need privileges).
+
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Controls diagnostic logging level. Default: \fBinfo\fR.
+
+.B Values:
+\fBerror\fR, \fBwarn\fR, \fBinfo\fR, \fBdebug\fR, \fBtrace\fR.
+
+.B Example:
+.RS
+.B RUST_LOG=debug mybtrfs run /mnt/data snapshots backup 2>debug.log
+.RE
+
+.TP
+.B SSH_KEY
+If set, passed to SSH for key-based authentication on remote endpoints.
+(Consult ssh(1) for remote authentication details.)
+
+.TP
+.B TMPDIR
+If set, the default lock file is placed in this directory instead of /tmp.
+
+.SH FILES
+.TP
+.B <tmpdir>/mybtrfs-<uid>.lock
+Default run lock file (per-user, in the system temp directory).
+
+.SH NOTES
+.B Safety invariants:
+.RS
+.IP \(bu 2
+Send/receive is always verified: the received subvolume must be read-only,
+have a \fBreceived_uuid\fR, and have the correct \fBparent_uuid\fR.
+.IP \(bu 2
+Delete-safety anchors: the just-created snapshot/backup and the latest
+common snapshot/backup pair are always preserved. Deletion is skipped
+entirely if any target was unreachable.
+.IP \(bu 2
+Restore never flips read-only via \fBbtrfs property set\fR (which poisons
+\fBreceived_uuid\fR). The only path to a writable subvolume is an
+unadorned snapshot without \fB\-r\fR.
+.RE
+
+.B Statelessness:
+mybtrfs re-derives all truth from live btrfs metadata each run—no persistent
+state file, no database. Snapshots are named with timestamps and collision
+counters; non-matching names are left untouched.
+
+.B SSH authentication:
+Remote backups use your system SSH configuration (typically
+\fB~/.ssh/config\fR, \fB~/.ssh/id_*\fR, and ssh-agent). Ensure the remote
+user has btrfs mount/snapshot/send permissions.
+
+.SH SEE ALSO
+btrfs(8), btrfs-send(8), btrfs-receive(8), ssh(1)
+
+.B Project documentation:
+https://github.com/jvidal86/mybtrfs
+
+.B btrbk (reference):
+https://github.com/digint/btrbk
+
+.SH AUTHOR
+Written as a Rust reimagining of btrbk (Perl).
+Repository: https://github.com/jvidal86/mybtrfs
+License: GPL-3.0-or-later

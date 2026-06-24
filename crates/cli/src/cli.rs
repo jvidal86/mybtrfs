@@ -119,7 +119,14 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
 
 /// `mybtrfs` — a backup tool for btrfs subvolumes (a Rust reimagining of btrbk).
 #[derive(Parser)]
-#[command(name = "mybtrfs", version, about)]
+#[command(
+    name = "mybtrfs",
+    version,
+    about = "A backup tool for btrfs subvolumes (a Rust reimagining of btrbk)",
+    long_about = "mybtrfs — btrfs-native backup tool with incremental send/receive, GFS retention, \
+and SSH remote support. Works with local directories or remote ssh://host/path endpoints. \
+Use 'mybtrfs <command> --help' for detailed command options."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -149,7 +156,7 @@ enum Command {
         /// Base name for the snapshot (a timestamp is appended).
         basename: String,
     },
-    /// Full backup: snapshot the source, send/receive to the target, then prune.
+    /// Full backup: snapshot the source, send/receive to the target (local or remote SSH), then prune.
     Run {
         /// Source subvolume to back up.
         source: PathBuf,
@@ -157,9 +164,8 @@ enum Command {
         snapshot_dir: PathBuf,
         /// Base name for the snapshot (a timestamp is appended).
         basename: String,
-        /// Target for the backup: a local directory, or a remote
-        /// `ssh://[user@]host[:port]/path` endpoint. If omitted, you are prompted
-        /// to pick a discovered btrfs drive (`<mountpoint>/<hostname>/`).
+        /// Target for the backup: a local directory path, or a remote `ssh://[user@]host[:port]/path` endpoint.
+        /// If omitted, you are prompted to pick a discovered btrfs drive.
         target_dir: Option<PathBuf>,
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
@@ -167,13 +173,13 @@ enum Command {
         #[command(flatten)]
         retention: RetentionArgs,
     },
-    /// Re-send the latest not-yet-backed-up snapshot without creating a new one.
+    /// Resume an incomplete backup: re-send the latest snapshot (local or remote SSH) without creating a new one.
     Resume {
         /// Directory holding the source-side snapshots.
         snapshot_dir: PathBuf,
         /// Base name of the snapshot series to resume.
         basename: String,
-        /// Target directory on the backup filesystem.
+        /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
         target_dir: PathBuf,
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
@@ -181,11 +187,11 @@ enum Command {
         #[command(flatten)]
         retention: RetentionArgs,
     },
-    /// Prune snapshots/backups per retention policy (no snapshot, no transfer).
+    /// Prune snapshots/backups per retention policy (no new snapshot or transfer, just cleanup).
     Prune {
         /// Directory holding the source-side snapshots.
         snapshot_dir: PathBuf,
-        /// Target directory on the backup filesystem.
+        /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
         target_dir: PathBuf,
         /// Show what would be deleted without deleting anything.
         #[arg(long)]
@@ -209,18 +215,18 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// List source snapshots with their correlated backups (Phase 3).
+    /// List source snapshots with their correlated backups (inventory view).
     List {
         /// Directory holding the source-side snapshots.
         snapshot_dir: PathBuf,
-        /// Target directory on the backup filesystem.
+        /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
         target_dir: PathBuf,
     },
-    /// Show aggregate backup statistics (Phase 3).
+    /// Show aggregate backup statistics (snapshot/backup counts, sizes, space savings).
     Stats {
         /// Directory holding the source-side snapshots.
         snapshot_dir: PathBuf,
-        /// Target directory on the backup filesystem.
+        /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
         target_dir: PathBuf,
     },
     /// List candidate backup drives (Phase 1 UX).
