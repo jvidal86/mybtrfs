@@ -92,9 +92,11 @@ impl LoopbackBtrfs {
 impl Drop for LoopbackBtrfs {
     fn drop(&mut self) {
         // Best-effort teardown — runs even if the test panicked.
-        let _ = Command::new("umount").arg(&self.mountpoint).status();
-        let _ = Command::new("losetup")
-            .args(["-d", &self.loop_dev])
+        let _ = Command::new("sudo")
+            .args(&["umount", self.mountpoint.to_str().unwrap()])
+            .status();
+        let _ = Command::new("sudo")
+            .args(&["losetup", "-d", &self.loop_dev])
             .status();
         let _ = fs::remove_dir_all(&self.mountpoint);
         let _ = fs::remove_file(&self.image);
