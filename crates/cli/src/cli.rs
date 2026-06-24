@@ -696,6 +696,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 Endpoint::Local(backup) => {
                     let backup = validate_path(&backup)?;
                     RestoreService::new(&btrfs, &btrfs, &btrfs, &btrfs, &logging_deleter, &localfs)
+                        .with_progress(progress.as_ref())
                         .restore(&backup, &dest, *force, *dry_run)
                 }
                 Endpoint::Remote { ssh, path } => {
@@ -709,6 +710,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                         &logging_deleter, // staging cleanup (local)
                         &localfs,
                     )
+                    .with_progress(progress.as_ref())
                     .restore(&path, &dest, *force, *dry_run)
                 }
             }
@@ -723,6 +725,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
             let inventory = InventoryService::new(&btrfs, &btrfs)
+                .with_progress(progress.as_ref())
                 .list(&snapshot_dir, &target_dir)
                 .context("listing the inventory failed")?;
             print_inventory(&inventory);
@@ -735,6 +738,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
             let stats = InventoryService::new(&btrfs, &btrfs)
+                .with_progress(progress.as_ref())
                 .stats(&snapshot_dir, &target_dir)
                 .context("computing statistics failed")?;
             print_stats(&stats);
@@ -813,6 +817,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     &target_dir,
                     &snapshot_policy,
                     &target_policy,
+                    progress.as_ref(),
                 )
             } else {
                 prune_with(
@@ -822,6 +827,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     &target_dir,
                     &snapshot_policy,
                     &target_policy,
+                    progress.as_ref(),
                 )
             }
             .context("prune failed")?;
@@ -842,13 +848,11 @@ fn prune_with(
     target_dir: &Path,
     snapshot_policy: &RetentionPolicy,
     target_policy: &RetentionPolicy,
+    progress: &dyn mybtrfs_application::ports::ProgressPort,
 ) -> Result<PruneReport, PortError> {
-    PruneService::new(btrfs, btrfs, retention).prune(
-        snapshot_dir,
-        target_dir,
-        snapshot_policy,
-        target_policy,
-    )
+    PruneService::new(btrfs, btrfs, retention)
+        .with_progress(progress)
+        .prune(snapshot_dir, target_dir, snapshot_policy, target_policy)
 }
 
 /// Ensure `dir` exists, creating it (and any missing parents) after confirmation
@@ -1174,10 +1178,7 @@ fn print_inventory(inventory: &Inventory) {
                 .display()
         );
         for backup in &status.backups {
-            println!(
-                "backup\t{}",
-                backup.mountpoint.join(&backup.path).display()
-            );
+            println!("backup\t{}", backup.mountpoint.join(&backup.path).display());
         }
     }
     for orphan in &inventory.orphan_backups {

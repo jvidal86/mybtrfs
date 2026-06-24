@@ -12,7 +12,7 @@ use mybtrfs_domain::model::{RelationshipGraph, Subvolume};
 use mybtrfs_domain::retention::{RetentionPolicy, Schedule};
 use mybtrfs_domain::safety::{SafetyContext, latest_common_pair};
 
-use crate::ports::{DeleteCommit, PortError, SubvolumeRepository};
+use crate::ports::{DeleteCommit, NULL_PROGRESS, PortError, ProgressPort, SubvolumeRepository};
 use crate::retention::RetentionService;
 
 /// The outcome of a `prune`: the preserve/delete partitions for each set.
@@ -30,11 +30,14 @@ pub struct PruneService<'a> {
     source_repo: &'a dyn SubvolumeRepository,
     target_repo: &'a dyn SubvolumeRepository,
     retention: &'a RetentionService<'a>,
+    /// Progress reporter; [`NullProgress`](crate::ports::NullProgress) by
+    /// default (no-op). Set via [`with_progress`](Self::with_progress).
+    progress: &'a dyn ProgressPort,
 }
 
 impl<'a> PruneService<'a> {
     /// Construct a service over the source/target repositories and the retention
-    /// service.
+    /// service. Progress reporting defaults to no-op.
     #[must_use]
     pub fn new(
         source_repo: &'a dyn SubvolumeRepository,
@@ -45,7 +48,15 @@ impl<'a> PruneService<'a> {
             source_repo,
             target_repo,
             retention,
+            progress: &NULL_PROGRESS,
         }
+    }
+
+    /// Set the [`ProgressPort`] for this service. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_progress(mut self, progress: &'a dyn ProgressPort) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Prune snapshots in `snapshot_dir` (`snapshot_policy`) and backups in
@@ -65,8 +76,11 @@ impl<'a> PruneService<'a> {
         snapshot_policy: &RetentionPolicy,
         target_policy: &RetentionPolicy,
     ) -> Result<PruneReport, PortError> {
+        self.progress
+            .start_spinner("Scanning snapshots and backups…");
         let snapshots = subvols_in(self.source_repo, snapshot_dir)?;
         let backups = subvols_in(self.target_repo, target_dir)?;
+        self.progress.finish("");
 
         // Force-preserve the latest common snapshot/backup pair (invariant #4).
         // (Mirrors BackupService::prune_both's anchor — minus any "just-created"
@@ -104,6 +118,15 @@ impl<'a> PruneService<'a> {
             },
             DeleteCommit::Deferred,
         )?;
+
+        let backup_delete_count = backups_pruned.delete.len();
+        if backup_delete_count > 0 {
+            self.progress
+                .start_bar("Pruning backups", backup_delete_count as u64);
+            self.progress
+                .finish(&format!("Pruned {backup_delete_count} backups"));
+        }
+
         let snapshots_pruned = self.retention.prune(
             &snapshots,
             snapshot_policy,
@@ -113,6 +136,14 @@ impl<'a> PruneService<'a> {
             },
             DeleteCommit::Deferred,
         )?;
+
+        let snapshot_delete_count = snapshots_pruned.delete.len();
+        if snapshot_delete_count > 0 {
+            self.progress
+                .start_bar("Pruning snapshots", snapshot_delete_count as u64);
+            self.progress
+                .finish(&format!("Pruned {snapshot_delete_count} snapshots"));
+        }
 
         Ok(PruneReport {
             snapshots_pruned,

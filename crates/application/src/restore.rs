@@ -19,8 +19,8 @@ use mybtrfs_domain::model::{RelationshipGraph, Subvolume};
 use mybtrfs_domain::parent::{Incremental, ParentSelection, best_parent};
 
 use crate::ports::{
-    DeleteCommit, DeletePort, FilesystemPort, PortError, SnapshotPort, SubvolumeRepository,
-    TransferPort,
+    DeleteCommit, DeletePort, FilesystemPort, NULL_PROGRESS, PortError, ProgressPort, SnapshotPort,
+    SubvolumeRepository, TransferPort,
 };
 
 /// The outcome of a `restore`: the writable subvolume produced, where any
@@ -80,6 +80,9 @@ pub struct RestoreService<'a> {
     transfer: &'a dyn TransferPort,
     deleter: &'a dyn DeletePort,
     fs: &'a dyn FilesystemPort,
+    /// Progress reporter; [`NullProgress`](crate::ports::NullProgress) by
+    /// default (no-op). Set via [`with_progress`](Self::with_progress).
+    progress: &'a dyn ProgressPort,
 }
 
 impl<'a> RestoreService<'a> {
@@ -89,7 +92,7 @@ impl<'a> RestoreService<'a> {
     /// (always local) for incremental-parent correlation. For a same-filesystem or
     /// local transfer-back both are the same adapter; for a restore *from* a remote
     /// source they differ. transfer + delete carry out and then clean up a
-    /// transfer-back.
+    /// transfer-back. Progress reporting defaults to no-op.
     #[must_use]
     pub fn new(
         repo: &'a dyn SubvolumeRepository,
@@ -106,7 +109,15 @@ impl<'a> RestoreService<'a> {
             transfer,
             deleter,
             fs,
+            progress: &NULL_PROGRESS,
         }
+    }
+
+    /// Set the [`ProgressPort`] for this service. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_progress(mut self, progress: &'a dyn ProgressPort) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Restore `backup` (a read-only subvolume) to a writable subvolume at `dest`.
@@ -150,7 +161,9 @@ impl<'a> RestoreService<'a> {
         // Subvolume to send if a transfer-back is needed). `dest` is on the same
         // filesystem iff it falls under the backup's mountpoint; otherwise the
         // backup is remote and must be transferred back first.
+        self.progress.start_spinner("Resolving backup metadata…");
         let backup_subvol = self.repo.show(backup)?;
+        self.progress.finish("");
         let transferred_back = !dest.starts_with(&backup_subvol.mountpoint);
 
         // Resolve the (collision-safe) move-aside target. This is a pure query

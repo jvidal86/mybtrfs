@@ -12,7 +12,7 @@ use mybtrfs_domain::model::{RelationshipGraph, Subvolume};
 use mybtrfs_domain::naming::parse_name;
 use mybtrfs_domain::parent::target_correlates;
 
-use crate::ports::{PortError, SubvolumeRepository};
+use crate::ports::{NULL_PROGRESS, PortError, ProgressPort, SubvolumeRepository};
 
 /// A source snapshot together with its correlated backups on the target (empty
 /// when the snapshot is not yet backed up).
@@ -56,10 +56,14 @@ pub struct Stats {
 pub struct InventoryService<'a> {
     source_repo: &'a dyn SubvolumeRepository,
     target_repo: &'a dyn SubvolumeRepository,
+    /// Progress reporter; [`NullProgress`](crate::ports::NullProgress) by
+    /// default (no-op). Set via [`with_progress`](Self::with_progress).
+    progress: &'a dyn ProgressPort,
 }
 
 impl<'a> InventoryService<'a> {
     /// Construct a service over the source and target subvolume repositories.
+    /// Progress reporting defaults to no-op.
     #[must_use]
     pub fn new(
         source_repo: &'a dyn SubvolumeRepository,
@@ -68,7 +72,15 @@ impl<'a> InventoryService<'a> {
         Self {
             source_repo,
             target_repo,
+            progress: &NULL_PROGRESS,
         }
+    }
+
+    /// Set the [`ProgressPort`] for this service. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_progress(mut self, progress: &'a dyn ProgressPort) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Inventory the snapshots in `snapshot_dir` and backups in `target_dir`,
@@ -79,8 +91,10 @@ impl<'a> InventoryService<'a> {
     /// [`PortError`] from either repository; [`PortError::Verification`] if the
     /// target backups carry a duplicate uuid (cloned-disk guard, invariant #10).
     pub fn list(&self, snapshot_dir: &Path, target_dir: &Path) -> Result<Inventory, PortError> {
+        self.progress.start_spinner("Scanning subvolumes…");
         let snapshots = managed_in(self.source_repo, snapshot_dir)?;
         let backups = managed_in(self.target_repo, target_dir)?;
+        self.progress.finish("");
         let graph = RelationshipGraph::build(backups.clone()).map_err(|err| {
             log::error!("duplicate uuid detected: {err} — cloned disk guard triggered");
             PortError::Verification(err.to_string())
