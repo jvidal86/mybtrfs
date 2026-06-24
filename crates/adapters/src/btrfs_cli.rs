@@ -289,7 +289,13 @@ impl TransferPort for BtrfsCliAdapter {
             Ok(received) => {
                 if received.is_garbled() {
                     // btrfs-progs leaves garbled subvolumes behind; delete by hand.
-                    let _ = self.delete(&received_path, DeleteCommit::Each);
+                    if let Err(e) = self.delete(&received_path, DeleteCommit::Each) {
+                        log::warn!(
+                            "failed to clean up garbled backup at {}: {}; you may need to delete it manually",
+                            received_path.display(),
+                            e
+                        );
+                    }
                 }
                 transfer?; // a pipe failure surfaces here (garbled already cleaned)
                 verify_received(&received, selection.parent.is_none())?;
