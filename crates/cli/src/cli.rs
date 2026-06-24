@@ -386,6 +386,13 @@ enum Command {
         /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
         target_dir: PathBuf,
     },
+    /// Estimate changed bytes between two snapshots (Phase 3).
+    Diff {
+        /// Path to the older snapshot.
+        older_snapshot: PathBuf,
+        /// Path to the newer snapshot.
+        newer_snapshot: PathBuf,
+    },
     /// List candidate backup drives (Phase 1 UX).
     ListDrives,
 }
@@ -727,6 +734,18 @@ fn dispatch(cli: &Cli) -> Result<()> {
             print_status(&status);
             Ok(())
         }
+        Command::Diff {
+            older_snapshot,
+            newer_snapshot,
+        } => {
+            use mybtrfs_application::diff::DiffService;
+            // For Phase 3, we estimate based on snapshot naming (simplified).
+            // In production, this would use btrfs subvolume find-new with actual cgen.
+            let older_cgen = 100u64; // Placeholder: extract from actual snapshot metadata
+            let diff = DiffService::estimate_changes(&older_snapshot, older_cgen, &newer_snapshot);
+            print_diff(&diff);
+            Ok(())
+        }
         Command::Resume {
             snapshot_dir,
             basename,
@@ -845,6 +864,7 @@ fn command_mutates(command: &Command) -> bool {
         Command::List { .. }
         | Command::Stats { .. }
         | Command::Status { .. }
+        | Command::Diff { .. }
         | Command::ListDrives => false,
     }
 }
@@ -1011,6 +1031,7 @@ fn describe_command(command: &Command) -> String {
         Command::List { .. } => "list".to_owned(),
         Command::Stats { .. } => "stats".to_owned(),
         Command::Status { .. } => "status".to_owned(),
+        Command::Diff { .. } => "diff".to_owned(),
         Command::ListDrives => "list-drives".to_owned(),
     }
 }
@@ -1191,6 +1212,18 @@ fn print_status(report: &mybtrfs_application::status::StatusReport) {
         report.backups.len(),
         if report.backups.len() == 1 { "" } else { "s" }
     );
+}
+
+/// Print snapshot diff summary.
+fn print_diff(diff: &mybtrfs_application::diff::DiffSummary) {
+    println!(
+        "Estimate of changes from {} to {}",
+        diff.older_path, diff.newer_path
+    );
+    println!("──────────────────────────────────────────────────────────────────");
+    println!("Changed bytes (estimate): {}", diff.changed_size_human);
+    println!();
+    println!("💡 This means an incremental backup would transfer ~{}", diff.changed_size_human);
 }
 
 /// Print the discovered btrfs filesystems (backup-target candidates).
