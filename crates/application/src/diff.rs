@@ -65,6 +65,7 @@ impl DiffService {
 }
 
 /// Format bytes as human-readable size.
+#[must_use]
 pub fn format_bytes(bytes: u64) -> String {
     if bytes < 1_000_000 {
         format!("{} KB", bytes / 1000)

@@ -264,6 +264,86 @@ pub(crate) fn parse_filesystem_uuid(output: &str) -> Result<Uuid, PortError> {
         })
 }
 
+/// Parse the "Referenced:" byte count from `btrfs subvolume show` output.
+///
+/// The field looks like `    Referenced:         1.23GiB` (using btrfs-progs'
+/// human-readable units: B, KiB, MiB, GiB, TiB, EiB). A missing or malformed
+/// field is a parse **error** (rule 16): callers need a real byte count, not 0.
+///
+/// # Errors
+/// [`PortError::Parse`] if the "Referenced:" field is absent or its value cannot
+/// be decoded as `<number> <unit>`.
+pub(crate) fn parse_referenced_bytes(show_output: &str) -> Result<u64, PortError> {
+    const KEY: &str = "Referenced:";
+    let raw = show_output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(KEY))
+        .ok_or_else(|| {
+            PortError::Parse("missing 'Referenced:' field in btrfs subvolume show output".into())
+        })?
+        .trim();
+    parse_btrfs_size(raw)
+        .ok_or_else(|| PortError::Parse(format!("malformed 'Referenced:' value: {raw:?}")))
+}
+
+/// Parse the total changed-bytes count from `btrfs subvolume find-new` output.
+///
+/// Each changed extent is reported as a line starting with `inode` containing a
+/// `len <N>` field. This function sums all `len` values. The final
+/// `transid marker was <N>` line is skipped. Returns `0` when no extents were
+/// modified (the output is only the transid line).
+///
+/// # Errors
+/// [`PortError::Parse`] if a line starts with `inode` but does not contain a
+/// parseable `len <N>` field — a present-but-malformed value is an error, not a
+/// silent skip (rule 16).
+pub(crate) fn parse_find_new_changed_bytes(find_new_output: &str) -> Result<u64, PortError> {
+    let mut total: u64 = 0;
+    for line in find_new_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("transid") {
+            continue;
+        }
+        if !trimmed.starts_with("inode") {
+            return Err(PortError::Parse(format!(
+                "unexpected line in btrfs subvolume find-new output: {trimmed:?}"
+            )));
+        }
+        // Extract `len <N>` from the inode line.
+        let len_bytes = trimmed
+            .split_whitespace()
+            .skip_while(|t| *t != "len")
+            .nth(1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| {
+                PortError::Parse(format!(
+                    "missing or non-numeric 'len' field in find-new line: {trimmed:?}"
+                ))
+            })?;
+        total = total.saturating_add(len_bytes);
+    }
+    Ok(total)
+}
+
+/// Parse a btrfs human-readable size string (e.g. `"1.23GiB"`, `"512.00MiB"`).
+/// Returns `None` for unrecognised formats.
+fn parse_btrfs_size(s: &str) -> Option<u64> {
+    // Find the split between the numeric part and the unit suffix.
+    let split = s.find(|c: char| c.is_alphabetic())?;
+    let (num_str, unit) = s.split_at(split);
+    let num: f64 = num_str.trim().parse().ok()?;
+    let multiplier: f64 = match unit.trim() {
+        "B" => 1.0,
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "TiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "EiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((num * multiplier) as u64)
+}
+
 /// Extract a (mandatory) capture group as a string slice.
 fn group<'a>(caps: &Captures<'a>, index: usize, line: &str) -> Result<&'a str, PortError> {
     caps.get(index)
@@ -529,6 +609,106 @@ ID 260 gen 130 top level 5 path <FS_TREE>/backups/@data.20260622T1900
         crate::init_test_logger();
         let line = "ID 256 gen 120 cgen 95 top level 5 parent_uuid - received_uuid - uuid GARBAGE path @data\n";
         let err = parse_list(line, "", &fs(), &mountpoint()).unwrap_err();
+        assert!(matches!(err, PortError::Parse(_)));
+    }
+
+    // ── parse_referenced_bytes ─────────────────────────────────────────────
+
+    const SHOW_WITH_REFERENCED: &str = "\
+@data
+    Name:                 @data
+    UUID:                 a1a1a1a1-1111-4111-8111-111111111111
+    Parent UUID:          -
+    Received UUID:        -
+    Creation time:        2026-06-22 19:00:00 +0000
+    Subvolume ID:         256
+    Generation:           120
+    Gen at creation:      95
+    Parent ID:            5
+    Top level ID:         5
+    Flags:                -
+    Referenced:           1.23GiB
+    Exclusive:            256.00MiB
+    Snapshot(s):
+";
+
+    #[test]
+    fn referenced_bytes_parses_gib() {
+        let bytes = parse_referenced_bytes(SHOW_WITH_REFERENCED).unwrap();
+        // 1.23 * 1024^3 = 1_320_702_443 bytes; allow ±1 for floating-point rounding
+        assert!(
+            (1_320_702_000..=1_321_000_000).contains(&bytes),
+            "unexpected: {bytes}"
+        );
+    }
+
+    #[test]
+    fn referenced_bytes_parses_mib() {
+        let output = "    Referenced:           512.00MiB\n";
+        let bytes = parse_referenced_bytes(output).unwrap();
+        assert_eq!(bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn referenced_bytes_parses_kib() {
+        let output = "    Referenced:           4.00KiB\n";
+        let bytes = parse_referenced_bytes(output).unwrap();
+        assert_eq!(bytes, 4 * 1024);
+    }
+
+    #[test]
+    fn referenced_bytes_missing_field_is_error() {
+        let output = "    UUID: a1a1a1a1-1111-4111-8111-111111111111\n";
+        let err = parse_referenced_bytes(output).unwrap_err();
+        assert!(matches!(err, PortError::Parse(_)));
+    }
+
+    #[test]
+    fn referenced_bytes_malformed_value_is_error() {
+        let output = "    Referenced:           not-a-size\n";
+        let err = parse_referenced_bytes(output).unwrap_err();
+        assert!(matches!(err, PortError::Parse(_)));
+    }
+
+    // ── parse_find_new_changed_bytes ───────────────────────────────────────
+
+    const FIND_NEW_WITH_CHANGES: &str = "\
+inode 258 file offset 0 len 131072 disk start 24117248 offset 0 gen 12 flags 0x1
+inode 258 file offset 131072 len 65536 disk start 24248320 offset 0 gen 12 flags 0x1
+inode 259 file offset 0 len 4096 disk start 0 offset 0 gen 12 flags 0x0
+transid marker was 12
+";
+
+    #[test]
+    fn find_new_sums_len_fields() {
+        let bytes = parse_find_new_changed_bytes(FIND_NEW_WITH_CHANGES).unwrap();
+        assert_eq!(bytes, 131072 + 65536 + 4096);
+    }
+
+    #[test]
+    fn find_new_empty_output_is_zero() {
+        // Only the transid line → nothing changed.
+        let bytes = parse_find_new_changed_bytes("transid marker was 120\n").unwrap();
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn find_new_truly_empty_output_is_zero() {
+        let bytes = parse_find_new_changed_bytes("").unwrap();
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn find_new_unexpected_line_is_error() {
+        let output = "garbage line that is not inode or transid\n";
+        let err = parse_find_new_changed_bytes(output).unwrap_err();
+        assert!(matches!(err, PortError::Parse(_)));
+    }
+
+    #[test]
+    fn find_new_missing_len_field_is_error() {
+        let output = "inode 258 file offset 0 disk start 0\n"; // no `len` token
+        let err = parse_find_new_changed_bytes(output).unwrap_err();
         assert!(matches!(err, PortError::Parse(_)));
     }
 }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, PortError, ProgressPort, SnapshotPort, SubvolumeRepository,
+    DeleteCommit, DeletePort, DiffPort, PortError, ProgressPort, SnapshotPort, SubvolumeRepository,
     TransferPort,
 };
 use mybtrfs_domain::model::{Subvolume, Uuid};
@@ -320,6 +320,40 @@ impl DeletePort for BtrfsCliAdapter {
         args.push(path.as_os_str());
         self.runner.run(BTRFS, &args)?;
         Ok(())
+    }
+}
+
+impl DiffPort for BtrfsCliAdapter {
+    fn referenced_bytes(&self, path: &Path) -> Result<u64, PortError> {
+        log::debug!("btrfs subvolume show {:?} (referenced bytes)", path);
+        let output = self.runner.run(
+            BTRFS,
+            &[
+                OsStr::new("subvolume"),
+                OsStr::new("show"),
+                path.as_os_str(),
+            ],
+        )?;
+        parse::parse_referenced_bytes(&output)
+    }
+
+    fn find_new_changed_bytes(&self, path: &Path, since_gen: u64) -> Result<u64, PortError> {
+        let gen_str = since_gen.to_string();
+        log::debug!(
+            "btrfs subvolume find-new {:?} {} (changed bytes)",
+            path,
+            gen_str
+        );
+        let output = self.runner.run(
+            BTRFS,
+            &[
+                OsStr::new("subvolume"),
+                OsStr::new("find-new"),
+                path.as_os_str(),
+                OsStr::new(&gen_str),
+            ],
+        )?;
+        parse::parse_find_new_changed_bytes(&output)
     }
 }
 

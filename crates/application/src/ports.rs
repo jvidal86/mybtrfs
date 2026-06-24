@@ -173,6 +173,29 @@ pub trait DriveDiscoveryPort {
     fn detect(&self) -> Result<Vec<DiscoveredFilesystem>, PortError>;
 }
 
+/// Read-only diff queries against btrfs metadata, used by the `diff` command.
+/// Kept separate from [`SubvolumeRepository`] because these methods are specific
+/// to diff estimation and are not needed by any other use case.
+pub trait DiffPort {
+    /// Return the "Referenced" byte count of the subvolume at `path`, as reported
+    /// by `btrfs subvolume show`. This is the total data referenced by the
+    /// subvolume (including shared extents with parents).
+    ///
+    /// # Errors
+    /// [`PortError::Command`] if btrfs fails; [`PortError::Parse`] if the
+    /// "Referenced:" field is absent or malformed.
+    fn referenced_bytes(&self, path: &Path) -> Result<u64, PortError>;
+
+    /// Return the total changed bytes in `path` since generation `since_gen`,
+    /// using `btrfs subvolume find-new`. Sums the `len` field of each reported
+    /// extent. Returns 0 if no extents were modified after `since_gen`.
+    ///
+    /// # Errors
+    /// [`PortError::Command`] if btrfs fails; [`PortError::Parse`] if any output
+    /// line is malformed.
+    fn find_new_changed_bytes(&self, path: &Path, since_gen: u64) -> Result<u64, PortError>;
+}
+
 /// The injected clock **and timezone** — the sole source of "now", so naming and
 /// retention are deterministic and testable (invariant #11).
 pub trait ClockPort {
@@ -269,6 +292,7 @@ impl ProgressPort for NullProgress {
 pub static NULL_PROGRESS: NullProgress = NullProgress;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
