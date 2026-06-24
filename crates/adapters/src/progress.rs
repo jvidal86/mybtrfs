@@ -107,3 +107,74 @@ fn with_bar(slot: &Mutex<Option<ProgressBar>>, f: impl FnOnce(&ProgressBar)) {
         f(bar);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mybtrfs_application::ports::ProgressPort;
+
+    #[test]
+    fn spinner_start_and_finish_clear() {
+        let p = IndicatifProgress::new();
+        p.start_spinner("scanning…");
+        p.finish("");
+    }
+
+    #[test]
+    fn spinner_finish_with_message() {
+        let p = IndicatifProgress::new();
+        p.start_spinner("scanning…");
+        p.finish("done");
+    }
+
+    #[test]
+    fn bar_start_advance_and_finish() {
+        let p = IndicatifProgress::new();
+        p.start_bar("deleting", 10);
+        p.advance_bar(5);
+        p.advance_bar(5);
+        p.finish("complete");
+    }
+
+    #[test]
+    fn report_bytes_while_spinner_active() {
+        let p = IndicatifProgress::new();
+        p.start_spinner("transferring");
+        p.report_bytes(500_000, 25_000);
+        p.report_bytes(1_000_000, 50_000);
+        p.finish("");
+    }
+
+    #[test]
+    fn starting_second_indicator_replaces_first() {
+        let p = IndicatifProgress::new();
+        p.start_spinner("first");
+        p.start_bar("second", 5); // silently finishes the spinner first
+        p.advance_bar(5);
+        p.finish("done");
+    }
+
+    #[test]
+    fn finish_without_active_indicator_is_noop() {
+        let p = IndicatifProgress::new();
+        p.finish(""); // nothing active — must not panic
+    }
+
+    #[test]
+    fn advance_without_active_indicator_is_noop() {
+        let p = IndicatifProgress::new();
+        p.advance_bar(1); // nothing active — must not panic
+    }
+
+    #[test]
+    fn report_bytes_without_active_indicator_is_noop() {
+        let p = IndicatifProgress::new();
+        p.report_bytes(1_000, 100); // nothing active — must not panic
+    }
+
+    #[test]
+    fn default_creates_inactive_instance() {
+        let p = IndicatifProgress::default();
+        p.finish(""); // should be a no-op
+    }
+}

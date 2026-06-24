@@ -171,3 +171,88 @@ impl CommandRunner for SystemCommandRunner {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_captures_stdout_of_successful_command() {
+        let runner = SystemCommandRunner;
+        let out = runner.run("echo", &[OsStr::new("hello")]).unwrap();
+        assert_eq!(out.trim(), "hello");
+    }
+
+    #[test]
+    fn run_returns_command_error_on_nonzero_exit() {
+        let runner = SystemCommandRunner;
+        let err = runner
+            .run("sh", &[OsStr::new("-c"), OsStr::new("exit 42")])
+            .unwrap_err();
+        assert!(matches!(err, PortError::Command(_)));
+        assert!(err.to_string().contains("sh"));
+    }
+
+    #[test]
+    fn pipe_direct_connects_producer_to_consumer() {
+        // echo "hello" | cat  — consumer output is discarded, success is enough.
+        let runner = SystemCommandRunner;
+        runner
+            .pipe(("echo", &[OsStr::new("hello")]), ("cat", &[]), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn pipe_instrumented_invokes_progress_callback() {
+        use std::sync::{Arc, Mutex};
+        let runner = SystemCommandRunner;
+        let reported = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let reported_clone = Arc::clone(&reported);
+
+        runner
+            .pipe(
+                ("echo", &[OsStr::new("hello from pipe")]),
+                ("cat", &[]),
+                Some(Arc::new(move |total, _speed| {
+                    reported_clone.lock().unwrap().push(total);
+                })),
+            )
+            .unwrap();
+
+        // The bridge thread emits at least one final progress report.
+        let calls = reported.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "progress callback should be called at least once"
+        );
+        assert!(*calls.last().unwrap() > 0, "total bytes should be > 0");
+    }
+
+    #[test]
+    fn pipe_returns_error_when_producer_fails() {
+        let runner = SystemCommandRunner;
+        let err = runner
+            .pipe(
+                ("sh", &[OsStr::new("-c"), OsStr::new("exit 1")]),
+                ("cat", &[]),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Command(_)));
+        assert!(err.to_string().contains("send"));
+    }
+
+    #[test]
+    fn pipe_returns_error_when_consumer_fails() {
+        let runner = SystemCommandRunner;
+        let err = runner
+            .pipe(
+                ("echo", &[OsStr::new("data")]),
+                ("sh", &[OsStr::new("-c"), OsStr::new("exit 2")]),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Command(_)));
+        assert!(err.to_string().contains("receive"));
+    }
+}

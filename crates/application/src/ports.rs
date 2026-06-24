@@ -267,3 +267,68 @@ impl ProgressPort for NullProgress {
 /// A static [`NullProgress`] suitable as a default `&'static dyn ProgressPort`
 /// for service constructors that don't require explicit progress wiring.
 pub static NULL_PROGRESS: NullProgress = NullProgress;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_error_command_display() {
+        let e = PortError::Command("btrfs exited 1".into());
+        assert!(e.to_string().contains("command failed"));
+        assert!(e.to_string().contains("btrfs exited 1"));
+    }
+
+    #[test]
+    fn port_error_parse_display() {
+        let e = PortError::Parse("unexpected field".into());
+        assert!(e.to_string().contains("parse error"));
+    }
+
+    #[test]
+    fn port_error_verification_display() {
+        let e = PortError::Verification("missing received_uuid".into());
+        assert!(e.to_string().contains("verification failed"));
+    }
+
+    #[test]
+    fn port_error_io_from_std() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let e: PortError = io.into();
+        assert!(e.to_string().contains("io error"));
+    }
+
+    #[test]
+    fn null_progress_all_methods_are_noops() {
+        let p = NullProgress;
+        p.start_spinner("scanning");
+        p.start_bar("deleting", 10);
+        p.advance_bar(3);
+        p.report_bytes(1_000_000, 50_000);
+        p.finish("done");
+        p.finish(""); // empty finish is also valid
+    }
+
+    #[test]
+    fn null_progress_static_ref_is_usable() {
+        let p: &dyn ProgressPort = &NULL_PROGRESS;
+        p.start_spinner("msg");
+        p.finish("");
+    }
+
+    #[test]
+    fn journal_default_last_entries_returns_empty() {
+        struct NoopJournal;
+        impl Journal for NoopJournal {
+            fn record(&self, _msg: &str) -> Result<(), PortError> {
+                Ok(())
+            }
+        }
+        let j = NoopJournal;
+        let entries = j.last_entries(10).expect("default impl should succeed");
+        assert!(
+            entries.is_empty(),
+            "default last_entries must return empty vec"
+        );
+    }
+}
