@@ -75,14 +75,19 @@ always send the full subvolume.
 Require a valid parent; fail if none exists.
 .RE
 .TP
-.BR \-\-snapshot\-preserve\-min " \{all|latest|none\}"
+.BR \-\-snapshot\-preserve\-min " \fISPEC\fR"
 Minimum snapshots to preserve regardless of age (default:
-.BR all,
-keep everything). Other values:
+.BR all).
+Values:
+.B all
+(keep everything),
 .B latest
 (keep only the newest),
-.B none
-(let retention policy decide).
+.B no
+(let retention tiers decide),
+or a count like
+.B 3d
+(keep at least 3 days' worth).
 .TP
 .BR \-\-snapshot\-preserve " \fISPEC\fR"
 Retention tiers for source snapshots using GFS notation (default: keep all).
@@ -91,42 +96,16 @@ Example:
 (keep hourly for 24 hours, daily for 7 days, weekly for 4 weeks, monthly for 12 months).
 See RETENTION POLICIES below.
 .TP
-.BR \-\-snapshot\-preserve\-hourly " \fIN\fR"
-Keep N hourly snapshots (overrides schedule).
-.TP
-.BR \-\-snapshot\-preserve\-daily " \fIN\fR"
-Keep N daily snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-weekly " \fIN\fR"
-Keep N weekly snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-monthly " \fIN\fR"
-Keep N monthly snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-yearly " \fIN\fR"
-Keep N yearly snapshots.
-.TP
-.BR \-\-target\-preserve\-min " \{all|latest|none\}"
+.BR \-\-target\-preserve\-min " \fISPEC\fR"
 Minimum backups to preserve (default:
 .BR all).
+Same values as
+.BR \-\-snapshot\-preserve\-min .
 .TP
 .BR \-\-target\-preserve " \fISPEC\fR"
 Retention tiers for backups (default: keep all).
-.TP
-.BR \-\-target\-preserve\-hourly " \fIN\fR"
-Keep N hourly backups.
-.TP
-.BR \-\-target\-preserve\-daily " \fIN\fR"
-Keep N daily backups.
-.TP
-.BR \-\-target\-preserve\-weekly " \fIN\fR"
-Keep N weekly backups.
-.TP
-.BR \-\-target\-preserve\-monthly " \fIN\fR"
-Keep N monthly backups.
-.TP
-.BR \-\-target\-preserve\-yearly " \fIN\fR"
-Keep N yearly backups.
+Same format as
+.BR \-\-snapshot\-preserve .
 .TP
 .B \-\-yes
 Assume "yes" to all confirmations (e.g., creating missing directories).

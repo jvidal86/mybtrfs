@@ -32,9 +32,19 @@ Backup target: local directory path or remote
 Show what would be deleted without actually deleting anything.
 Useful for testing a retention policy before applying it.
 .TP
-.BR \-\-snapshot\-preserve\-min " \{all|latest|none\}"
+.BR \-\-snapshot\-preserve\-min " \fISPEC\fR"
 Minimum snapshots to preserve (default:
 .BR all).
+Values:
+.B all
+(keep everything),
+.B latest
+(keep only the newest),
+.B no
+(let retention tiers decide),
+or a count like
+.B 3d
+(keep at least 3 days' worth).
 .TP
 .BR \-\-snapshot\-preserve " \fISPEC\fR"
 Retention tiers for source snapshots (e.g.,
@@ -43,42 +53,16 @@ Retention tiers for source snapshots (e.g.,
 .BR mybtrfs-run (1)
 for format details.
 .TP
-.BR \-\-snapshot\-preserve\-hourly " \fIN\fR"
-Keep N hourly snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-daily " \fIN\fR"
-Keep N daily snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-weekly " \fIN\fR"
-Keep N weekly snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-monthly " \fIN\fR"
-Keep N monthly snapshots.
-.TP
-.BR \-\-snapshot\-preserve\-yearly " \fIN\fR"
-Keep N yearly snapshots.
-.TP
-.BR \-\-target\-preserve\-min " \{all|latest|none\}"
+.BR \-\-target\-preserve\-min " \fISPEC\fR"
 Minimum backups to preserve (default:
 .BR all).
+Same values as
+.BR \-\-snapshot\-preserve\-min .
 .TP
 .BR \-\-target\-preserve " \fISPEC\fR"
 Retention tiers for backups.
-.TP
-.BR \-\-target\-preserve\-hourly " \fIN\fR"
-Keep N hourly backups.
-.TP
-.BR \-\-target\-preserve\-daily " \fIN\fR"
-Keep N daily backups.
-.TP
-.BR \-\-target\-preserve\-weekly " \fIN\fR"
-Keep N weekly backups.
-.TP
-.BR \-\-target\-preserve\-monthly " \fIN\fR"
-Keep N monthly backups.
-.TP
-.BR \-\-target\-preserve\-yearly " \fIN\fR"
-Keep N yearly backups.
+Same format as
+.BR \-\-snapshot\-preserve .
 .TP
 .B \-\-yes
 Assume "yes" to all confirmations.
@@ -95,7 +79,7 @@ Use a custom run lock file.
 .BR \-\-log-file " \fIPATH\fR"
 Write diagnostic logs to a file.
 .SH OUTPUT
-Tab-separated format:
+On a real run, tab-separated:
 .EX
 pruned	N	M
 .EE
@@ -103,9 +87,22 @@ where N is snapshots deleted and M is backups deleted.
 .PP
 With
 .B --dry-run,
-prefixes each item with
-.B would delete:
-instead of performing deletions.
+human-readable KEEP / DELETE sections are printed for both snapshots and
+backups, with snapshot names and ages relative to the run time. Nothing is
+deleted. Example:
+.EX
+SNAPSHOTS KEEP (3 snapshots):
+  keep  data.20260624T1432  [just now]
+  keep  data.20260623T1432  [1 day ago]
+  keep  data.20260617T1432  [7 days ago]
+SNAPSHOTS DELETE (2 snapshots):
+  delete  data.20260610T1432  [14 days ago]
+  delete  data.20260603T1432  [21 days ago]
+BACKUPS KEEP (3 snapshots):
+  ...
+BACKUPS DELETE (0 snapshots):
+  (nothing to delete)
+.EE
 .SH EXIT CODES
 .TP
 .B 0

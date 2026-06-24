@@ -12,8 +12,11 @@ Useful for predicting incremental backup size before running
 .BR mybtrfs-run (1).
 .PP
 Uses
+.BR "btrfs subvolume show" (8)
+to obtain the generation of the older snapshot, then
 .BR "btrfs subvolume find-new" (8)
-to scan the file metadata and identify changed blocks.
+to enumerate extents modified since that generation.
+The changed-byte count is the sum of all reported extent lengths.
 .SH ARGUMENTS
 .TP
 .B OLDER_SNAP
@@ -24,7 +27,13 @@ Path to a newer snapshot (read-only subvolume).
 .SH OPTIONS
 .TP
 .B \-q, \-\-quiet
-Suppress progress indicators.
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Append a timestamped audit line to the given file.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Use a custom run lock file (default: \fI<tmpdir>/mybtrfs-<uid>.lock\fR).
 .TP
 .BR \-\-log-file " \fIPATH\fR"
 Write diagnostic logs to a file.
@@ -87,8 +96,19 @@ echo "Changed bytes: $CHANGED"
 Both snapshots must be on the same btrfs filesystem.
 .TP
 \(bu
-The older snapshot's generation is used as the cutoff for
-.B find-new.
+The cutoff passed to
+.B find-new
+is the older snapshot's
+.B generation + 1
+(not its creation generation,
+.BR cgen ).
+On some read-only snapshots
+.B gen
+exceeds
+.B cgen
+by one; using
+.B generation + 1
+ensures no extents are missed.
 .TP
 \(bu
 The estimate is accurate for btrfs copy-on-write semantics; actual sent bytes
