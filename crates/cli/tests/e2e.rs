@@ -33,7 +33,10 @@ use std::process::Command;
 /// Automatically uses sudo for commands that require root.
 fn sh(program: &str, args: &[&str]) -> String {
     // Commands that need root
-    let needs_root = matches!(program, "losetup" | "mkfs.btrfs" | "mount" | "umount" | "btrfs");
+    let needs_root = matches!(
+        program,
+        "losetup" | "mkfs.btrfs" | "mount" | "umount" | "btrfs"
+    );
 
     let (cmd, final_args) = if needs_root {
         ("sudo", {

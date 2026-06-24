@@ -16,6 +16,7 @@ regex.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 # Other external deps (anyhow/thiserror) are added as each adapter is implemented.
 
 [dev-dependencies]

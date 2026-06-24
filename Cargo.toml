@@ -24,6 +24,7 @@ regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
+toml = "0.8"
 # Internal (layer crates)
 mybtrfs-domain = { path = "crates/domain" }
 mybtrfs-application = { path = "crates/application" }

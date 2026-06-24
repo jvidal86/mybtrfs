@@ -85,9 +85,9 @@ mod tests {
         let newer = Path::new("/snap/data.20260624T1432");
 
         let diff = DiffService::estimate_changes(
-            1_000_000_000,  // older: 1 GB
-            1_300_000_000,  // newer: 1.3 GB
-            300_000_000,    // changed: 300 MB
+            1_000_000_000, // older: 1 GB
+            1_300_000_000, // newer: 1.3 GB
+            300_000_000,   // changed: 300 MB
             older,
             newer,
         );
@@ -112,8 +112,7 @@ mod tests {
         let older = Path::new("/snap/a");
         let newer = Path::new("/snap/b");
 
-        let diff =
-            DiffService::estimate_changes(1_000_000_000, 1_000_000_000, 0, older, newer);
+        let diff = DiffService::estimate_changes(1_000_000_000, 1_000_000_000, 0, older, newer);
 
         assert_eq!(diff.changed_bytes, 0);
         assert_eq!(diff.changed_size_human, "0 KB");
@@ -124,20 +123,10 @@ mod tests {
         let older = Path::new("/snap/old");
         let newer = Path::new("/snap/new");
 
-        let diff1 = DiffService::estimate_changes(
-            1_000_000_000,
-            1_200_000_000,
-            200_000_000,
-            older,
-            newer,
-        );
-        let diff2 = DiffService::estimate_changes(
-            1_000_000_000,
-            1_200_000_000,
-            200_000_000,
-            older,
-            newer,
-        );
+        let diff1 =
+            DiffService::estimate_changes(1_000_000_000, 1_200_000_000, 200_000_000, older, newer);
+        let diff2 =
+            DiffService::estimate_changes(1_000_000_000, 1_200_000_000, 200_000_000, older, newer);
 
         assert_eq!(diff1, diff2);
     }

@@ -15,6 +15,7 @@ clap.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # The differential-conformance test (tests/diff_btrbk_schedule.rs) drives the

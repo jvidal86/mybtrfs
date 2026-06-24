@@ -3,6 +3,7 @@
 //! `FixedClock`, `ScriptedPrompter`) go behind `#[cfg(test)]` / a test-support
 //! module. See `documentation/02-architecture-v2.md` §3.
 
+pub(crate) mod backup_set;
 pub(crate) mod btrfs_cli;
 pub(crate) mod clock;
 pub(crate) mod command;
@@ -14,6 +15,9 @@ pub(crate) mod mounts;
 pub(crate) mod progress;
 pub(crate) mod prompter;
 pub(crate) mod ssh;
+
+/// Backup-set file parser (Phase 5 §4): pure TOML parsing for multi-job backup files.
+pub use backup_set::{BackupEntry, parse_backup_set};
 
 /// The btrfs-CLI-backed adapter (subvolume / snapshot / transfer / delete ports);
 /// resolves each path's filesystem from the mount table, so one instance serves

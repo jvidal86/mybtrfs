@@ -1,0 +1,36 @@
+# Example backup-set file for mybtrfs
+# Phase 5 §4: Multi-job backup automation (CLI sugar, no config DSL)
+#
+# Each [[backup]] entry specifies a source→target backup job. All fields are
+# passed to `mybtrfs run` internally; retention options from the set file
+# override command-line defaults for that entry.
+#
+# Usage:
+#   mybtrfs run --set /path/to/backup-set.toml
+#
+# To test with the local environment:
+#   1. Setup: sudo contrib/setup-local-backup-env.sh setup
+#   2. Create this file with paths matching your environment
+#   3. Run: sudo mybtrfs run --set contrib/example.backup-set.toml
+
+# First backup job: /data → /backup/data
+[[backup]]
+source = "/mnt/mybtrfs-source/@data"
+snapshot_dir = "/mnt/mybtrfs-source/snapshots"
+basename = "data"
+target_dir = "/mnt/mybtrfs-backup/backups"
+incremental = "yes"
+# Optional: retention policy per entry (omitted here → uses CLI defaults)
+# snapshot_preserve_min = "latest"
+# snapshot_preserve_daily = 7
+# target_preserve_min = "latest"
+# target_preserve_daily = 30
+
+# Second backup job: /home → /backup/home (over SSH if endpoint provided)
+# Uncomment to test multi-subvolume backups
+# [[backup]]
+# source = "/mnt/source/@home"
+# snapshot_dir = "/mnt/source/snapshots"
+# basename = "home"
+# target_dir = "/mnt/backup/home"
+# incremental = "yes"

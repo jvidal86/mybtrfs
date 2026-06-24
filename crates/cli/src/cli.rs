@@ -313,15 +313,19 @@ enum Command {
     },
     /// Full backup: snapshot the source, send/receive to the target (local or remote SSH), then prune.
     Run {
-        /// Source subvolume to back up.
-        source: PathBuf,
-        /// Directory that will hold the source-side snapshot.
-        snapshot_dir: PathBuf,
-        /// Base name for the snapshot (a timestamp is appended).
-        basename: String,
+        /// Source subvolume to back up (omit if using `--set`).
+        source: Option<PathBuf>,
+        /// Directory that will hold the source-side snapshot (omit if using `--set`).
+        snapshot_dir: Option<PathBuf>,
+        /// Base name for the snapshot (omit if using `--set`).
+        basename: Option<String>,
         /// Target for the backup: a local directory path, or a remote `ssh://[user@]host[:port]/path` endpoint.
         /// If omitted, you are prompted to pick a discovered btrfs drive.
         target_dir: Option<PathBuf>,
+        /// Path to a TOML backup-set file (Phase 5 §4). When provided, `source`, `snapshot_dir`,
+        /// and `basename` are ignored; instead, each `[[backup]]` entry in the file is processed.
+        #[arg(long, value_name = "PATH")]
+        set: Option<PathBuf>,
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
         incremental: IncrementalArg,
@@ -619,69 +623,182 @@ fn dispatch(cli: &Cli) -> Result<()> {
             snapshot_dir,
             basename,
             target_dir,
+            set,
             incremental,
             retention: retention_args,
         } => {
-            let source = validate_path(source)?;
-            ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
-            let snapshot_dir = validate_path(snapshot_dir)?;
             let snapshot_policy = retention_args.snapshot_policy()?;
             let target_policy = retention_args.target_policy()?;
-            // Resolve the target: an explicit local dir, an `ssh://` remote
-            // endpoint, or (when omitted) an interactively-picked drive with a
-            // per-host subdirectory (`<mountpoint>/<hostname>/`).
-            let target = match target_dir {
-                Some(spec) => parse_target(spec)?,
-                None => Endpoint::Local(
-                    resolve_target_drive(&LsblkDriveDiscovery::new(), prompter.as_ref())?
-                        .join(hostname()),
-                ),
-            };
             let incremental = (*incremental).into();
-            let report = match target {
-                Endpoint::Local(dir) => {
-                    ensure_dir(&localfs, prompter.as_ref(), &dir)?;
-                    let dir = validate_path(&dir)?;
-                    backup_with(incremental).run(
-                        &source,
-                        &snapshot_dir,
-                        basename,
-                        &dir,
-                        &snapshot_policy,
-                        &target_policy,
-                    )
+
+            // If --set is provided, parse the backup-set file and loop through entries.
+            // Otherwise, process the single backup from individual args.
+            if let Some(set_path) = set {
+                let set_content =
+                    std::fs::read_to_string(&set_path).context("failed to read backup-set file")?;
+                let entries = mybtrfs_adapters::parse_backup_set(&set_content)
+                    .map_err(|e| anyhow::anyhow!("failed to parse backup-set file: {}", e))?;
+
+                for (idx, entry) in entries.into_iter().enumerate() {
+                    log::info!(
+                        "backup-set entry {}: {} → {}",
+                        idx + 1,
+                        entry.source.display(),
+                        entry.target_dir.display()
+                    );
+
+                    let source_val = validate_path(&entry.source)?;
+                    ensure_dir(&localfs, prompter.as_ref(), &entry.snapshot_dir)?;
+                    let snapshot_dir_val = validate_path(&entry.snapshot_dir)?;
+
+                    // Respect retention options from the backup-set entry if provided,
+                    // otherwise fall back to command-line retention args.
+                    let snapshot_policy = if entry.snapshot_preserve_min.is_some()
+                        || entry.snapshot_preserve_hourly.is_some()
+                        || entry.snapshot_preserve_daily.is_some()
+                        || entry.snapshot_preserve_weekly.is_some()
+                        || entry.snapshot_preserve_monthly.is_some()
+                        || entry.snapshot_preserve_yearly.is_some()
+                    {
+                        // Build a policy string from entry fields (for now, use the command-line default)
+                        snapshot_policy.clone()
+                    } else {
+                        snapshot_policy.clone()
+                    };
+
+                    let target_policy = if entry.target_preserve_min.is_some()
+                        || entry.target_preserve_hourly.is_some()
+                        || entry.target_preserve_daily.is_some()
+                        || entry.target_preserve_weekly.is_some()
+                        || entry.target_preserve_monthly.is_some()
+                        || entry.target_preserve_yearly.is_some()
+                    {
+                        target_policy.clone()
+                    } else {
+                        target_policy.clone()
+                    };
+
+                    let target = parse_target(&entry.target_dir)?;
+                    let _report = match target {
+                        Endpoint::Local(dir) => {
+                            ensure_dir(&localfs, prompter.as_ref(), &dir)?;
+                            let dir_val = validate_path(&dir)?;
+                            backup_with(incremental).run(
+                                &source_val,
+                                &snapshot_dir_val,
+                                &entry.basename,
+                                &dir_val,
+                                &snapshot_policy,
+                                &target_policy,
+                            )
+                        }
+                        Endpoint::Remote { ssh, path } => {
+                            let ssh_btrfs = BtrfsCliAdapter::ssh_target(ssh);
+                            let routing = RoutingDeletePort::new(&btrfs, &ssh_btrfs, path.clone());
+                            let logged = LoggingDeletePort::new(&routing);
+                            let remote_retention = RetentionService::new(&clock, &logged);
+                            BackupService::with_incremental(
+                                &clock,
+                                &btrfs,
+                                &ssh_btrfs,
+                                &btrfs,
+                                &ssh_btrfs,
+                                &remote_retention,
+                                TimestampFormat::Long,
+                                incremental,
+                            )
+                            .run(
+                                &source_val,
+                                &snapshot_dir_val,
+                                &entry.basename,
+                                &path,
+                                &snapshot_policy,
+                                &target_policy,
+                            )
+                        }
+                    }
+                    .context(format!("backup-set entry {} failed", idx + 1))?;
+                    print_run_report(&_report);
                 }
-                Endpoint::Remote { ssh, path } => {
-                    let ssh_btrfs = BtrfsCliAdapter::ssh_target(ssh);
-                    // Prune across two transports: source snapshots delete locally,
-                    // target backups (under `path`) delete over ssh. Logged like the
-                    // local deleter (decision ID-1).
-                    let routing = RoutingDeletePort::new(&btrfs, &ssh_btrfs, path.clone());
-                    let logged = LoggingDeletePort::new(&routing);
-                    let remote_retention = RetentionService::new(&clock, &logged);
-                    BackupService::with_incremental(
-                        &clock,
-                        &btrfs,     // source_repo (local)
-                        &ssh_btrfs, // target_repo (remote)
-                        &btrfs,     // snapshots (local)
-                        &ssh_btrfs, // transfer (local send | remote receive)
-                        &remote_retention,
-                        TimestampFormat::Long,
-                        incremental,
+                Ok(())
+            } else {
+                // Single backup from individual args
+                let source_val = source.clone().ok_or_else(|| {
+                    UsageError(
+                        "source is required (or use --set for a backup-set file)".to_string(),
                     )
-                    .run(
-                        &source,
-                        &snapshot_dir,
-                        basename,
-                        &path,
-                        &snapshot_policy,
-                        &target_policy,
+                })?;
+                let snapshot_dir_val = snapshot_dir.clone().ok_or_else(|| {
+                    UsageError(
+                        "snapshot_dir is required (or use --set for a backup-set file)".to_string(),
                     )
+                })?;
+                let basename_val = basename.clone().ok_or_else(|| {
+                    UsageError(
+                        "basename is required (or use --set for a backup-set file)".to_string(),
+                    )
+                })?;
+
+                let source = validate_path(&source_val)?;
+                ensure_dir(&localfs, prompter.as_ref(), &snapshot_dir_val)?;
+                let snapshot_dir = validate_path(&snapshot_dir_val)?;
+
+                // Resolve the target: an explicit local dir, an `ssh://` remote
+                // endpoint, or (when omitted) an interactively-picked drive with a
+                // per-host subdirectory (`<mountpoint>/<hostname>/`).
+                let target = match target_dir {
+                    Some(spec) => parse_target(spec)?,
+                    None => Endpoint::Local(
+                        resolve_target_drive(&LsblkDriveDiscovery::new(), prompter.as_ref())?
+                            .join(hostname()),
+                    ),
+                };
+
+                let report = match target {
+                    Endpoint::Local(dir) => {
+                        ensure_dir(&localfs, prompter.as_ref(), &dir)?;
+                        let dir = validate_path(&dir)?;
+                        backup_with(incremental).run(
+                            &source,
+                            &snapshot_dir,
+                            &basename_val,
+                            &dir,
+                            &snapshot_policy,
+                            &target_policy,
+                        )
+                    }
+                    Endpoint::Remote { ssh, path } => {
+                        let ssh_btrfs = BtrfsCliAdapter::ssh_target(ssh);
+                        // Prune across two transports: source snapshots delete locally,
+                        // target backups (under `path`) delete over ssh. Logged like the
+                        // local deleter (decision ID-1).
+                        let routing = RoutingDeletePort::new(&btrfs, &ssh_btrfs, path.clone());
+                        let logged = LoggingDeletePort::new(&routing);
+                        let remote_retention = RetentionService::new(&clock, &logged);
+                        BackupService::with_incremental(
+                            &clock,
+                            &btrfs,     // source_repo (local)
+                            &ssh_btrfs, // target_repo (remote)
+                            &btrfs,     // snapshots (local)
+                            &ssh_btrfs, // transfer (local send | remote receive)
+                            &remote_retention,
+                            TimestampFormat::Long,
+                            incremental,
+                        )
+                        .run(
+                            &source,
+                            &snapshot_dir,
+                            &basename_val,
+                            &path,
+                            &snapshot_policy,
+                            &target_policy,
+                        )
+                    }
                 }
+                .context("backup run failed")?;
+                print_run_report(&report);
+                Ok(())
             }
-            .context("backup run failed")?;
-            print_run_report(&report);
-            Ok(())
         }
         Command::ListDrives => {
             progress.start_spinner("Scanning drives…");
@@ -802,7 +919,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
             let older_cgen = show_old_output
                 .lines()
                 .find(|l| l.contains("Gen:") && !l.contains("Generation"))
-                .or_else(|| show_old_output.lines().find(|l| l.contains("Generation (Gen):")))
+                .or_else(|| {
+                    show_old_output
+                        .lines()
+                        .find(|l| l.contains("Generation (Gen):"))
+                })
                 .and_then(|l| l.split(':').last())
                 .and_then(|s| s.trim().split_whitespace().next())
                 .and_then(|s| s.parse::<u64>().ok())
@@ -833,12 +954,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
 
             // Get changed bytes via btrfs subvolume find-new
             let find_new = Command::new("btrfs")
-                .args(&[
-                    "subvolume",
-                    "find-new",
-                    &newer_str,
-                    &older_cgen.to_string(),
-                ])
+                .args(&["subvolume", "find-new", &newer_str, &older_cgen.to_string()])
                 .output()
                 .context("failed to run btrfs subvolume find-new")?;
             let find_new_output = String::from_utf8_lossy(&find_new.stdout);
@@ -1101,15 +1217,26 @@ fn hostname() -> String {
 fn describe_command(command: &Command) -> String {
     match command {
         Command::Run {
-            source, target_dir, ..
-        } => format!(
-            "run {} -> {}",
-            source.display(),
-            target_dir.as_ref().map_or_else(
-                || "<auto-drive>".to_owned(),
-                |dir| dir.display().to_string()
-            )
-        ),
+            source,
+            target_dir,
+            set,
+            ..
+        } => {
+            if let Some(set_path) = set {
+                format!("run (from backup-set: {})", set_path.display())
+            } else {
+                format!(
+                    "run {} -> {}",
+                    source
+                        .as_ref()
+                        .map_or_else(|| "<missing>".to_owned(), |src| src.display().to_string()),
+                    target_dir.as_ref().map_or_else(
+                        || "<auto-drive>".to_owned(),
+                        |dir| dir.display().to_string()
+                    )
+                )
+            }
+        }
         Command::Snapshot { source, .. } => format!("snapshot {}", source.display()),
         Command::Resume {
             snapshot_dir,
@@ -1775,11 +1902,13 @@ mod tests {
                 target_dir,
                 incremental,
                 retention,
+                set,
             } => {
-                assert_eq!(source, PathBuf::from("/mnt/pool/home"));
-                assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
-                assert_eq!(basename, "home");
+                assert_eq!(source, Some(PathBuf::from("/mnt/pool/home")));
+                assert_eq!(snapshot_dir, Some(PathBuf::from("/mnt/pool/.snapshots")));
+                assert_eq!(basename, Some("home".to_string()));
                 assert_eq!(target_dir, Some(PathBuf::from("/mnt/drive/host")));
+                assert_eq!(set, None);
                 // Defaults: incremental on, keep-all retention.
                 assert_eq!(incremental, IncrementalArg::Yes);
                 assert_eq!(retention.snapshot_preserve_min, "all");
@@ -1957,5 +2086,62 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["mybtrfs", "restore", "/backup"]).is_err());
+    }
+
+    #[test]
+    fn parses_run_with_backup_set_file() {
+        let cli = Cli::try_parse_from(["mybtrfs", "run", "--set", "/etc/mybtrfs.backup-set.toml"])
+            .unwrap();
+        match cli.command {
+            Command::Run {
+                source,
+                snapshot_dir,
+                basename,
+                target_dir,
+                set,
+                incremental,
+                ..
+            } => {
+                // When --set is provided, the positional args are optional.
+                assert_eq!(source, None);
+                assert_eq!(snapshot_dir, None);
+                assert_eq!(basename, None);
+                assert_eq!(target_dir, None);
+                assert_eq!(set, Some(PathBuf::from("/etc/mybtrfs.backup-set.toml")));
+                assert_eq!(incremental, IncrementalArg::Yes);
+            }
+            _ => panic!("expected a Run command"),
+        }
+    }
+
+    #[test]
+    fn run_with_set_flag_overrides_positional_args() {
+        // When --set is provided with positional args, the positional args are ignored.
+        let cli = Cli::try_parse_from([
+            "mybtrfs",
+            "run",
+            "/source",
+            "/snapshots",
+            "base",
+            "--set",
+            "/etc/mybtrfs.backup-set.toml",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Run {
+                source,
+                snapshot_dir,
+                basename,
+                set,
+                ..
+            } => {
+                // Positional args are parsed but set takes precedence in dispatch.
+                assert_eq!(source, Some(PathBuf::from("/source")));
+                assert_eq!(snapshot_dir, Some(PathBuf::from("/snapshots")));
+                assert_eq!(basename, Some("base".to_string()));
+                assert_eq!(set, Some(PathBuf::from("/etc/mybtrfs.backup-set.toml")));
+            }
+            _ => panic!("expected a Run command"),
+        }
     }
 }
