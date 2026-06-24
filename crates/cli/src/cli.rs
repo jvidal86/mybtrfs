@@ -148,6 +148,10 @@ struct Cli {
     /// A second run that finds it held exits immediately with code 3.
     #[arg(long, global = true, value_name = "PATH")]
     lock: Option<PathBuf>,
+    /// Write logs to a file instead of stderr (frees stderr for progress indicators).
+    /// Use with `lnav` for log viewing: `lnav /path/to/logfile`.
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<PathBuf>,
 }
 
 /// The command set (see `documentation/01`). Phase 1 implements `snapshot` and
@@ -304,8 +308,26 @@ fn parse_policy(preserve_min: &str, preserve: &str) -> Result<RetentionPolicy> {
 /// Parse the command line and run; the returned exit code reflects success.
 #[must_use]
 pub fn run() -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+
+    // Initialize logging: to file (if --log-file) or stderr (default).
+    let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if let Some(ref log_file) = cli.log_file {
+        use std::fs::OpenOptions;
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+        {
+            Ok(file) => {
+                builder.target(env_logger::Target::Pipe(Box::new(file)));
+            }
+            Err(e) => {
+                eprintln!("warning: could not open log file {}: {}", log_file.display(), e);
+            }
+        }
+    }
+    builder.init();
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

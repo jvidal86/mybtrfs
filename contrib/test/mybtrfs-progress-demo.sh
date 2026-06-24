@@ -70,17 +70,21 @@ for i in {1..100}; do
   fi
 done
 
+LOGFILE="/tmp/mybtrfs-demo-$(date +%s).log"
 info "target directory:  $TGT_MNT"
+info "logging to:        $LOGFILE"
 echo ""
 info "running backup — watch for the progress spinner + bytes + speed!"
 info "spinner cycles: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ (updates every ~250ms)"
 echo ""
 
-# Run backup with progress indicators visible
-"$MYBTRFS" run "$SRC_MNT/data" "$SRC_MNT/.snap" "data" "$TGT_MNT" --yes
+# Run backup with progress indicators visible (logs go to file, not stderr)
+"$MYBTRFS" run "$SRC_MNT/data" "$SRC_MNT/.snap" "data" "$TGT_MNT" --yes --log-file "$LOGFILE"
 
 echo ""
 info "backup complete!"
 btrfs subvolume list "$TGT_MNT" | awk '{print $NF}'
 echo ""
 printf '\033[32mPASS\033[0m — progress indicators working end-to-end.\n'
+echo ""
+info "view logs with:  lnav $LOGFILE"
