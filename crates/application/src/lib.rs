@@ -6,9 +6,10 @@ pub mod ports;
 pub mod backup;
 pub mod inventory;
 pub mod prune;
+pub mod restore;
 pub mod retention;
 pub mod retention_preview;
-pub mod restore;
+pub mod status;
 
 /// Initialize `env_logger` once for unit tests (idempotent; safe to call from
 /// every `#[test]`). Logs go through the test harness and appear only for

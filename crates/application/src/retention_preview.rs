@@ -3,10 +3,10 @@
 //! TDD stubs for Phase 1: extend the existing `Schedule<T>` display logic into a
 //! human-readable formatter. No new logic; just a view over existing prune results.
 
-use mybtrfs_domain::retention::Schedule;
+use chrono::Local;
 use mybtrfs_domain::model::Subvolume;
 use mybtrfs_domain::naming::parse_name;
-use chrono::Local;
+use mybtrfs_domain::retention::Schedule;
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -265,7 +265,11 @@ pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
         }
         output.push_str("):\n");
         for sv in &schedule.preserve {
-            let name = sv.path.file_name().and_then(|n: &OsStr| n.to_str()).unwrap_or("?");
+            let name = sv
+                .path
+                .file_name()
+                .and_then(|n: &OsStr| n.to_str())
+                .unwrap_or("?");
             let age = compute_age(name, &now);
             output.push_str("  ✅ ");
             output.push_str(name);
@@ -286,7 +290,11 @@ pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
         }
         output.push_str(") — run with --yes to confirm:\n");
         for sv in &schedule.delete {
-            let name = sv.path.file_name().and_then(|n: &OsStr| n.to_str()).unwrap_or("?");
+            let name = sv
+                .path
+                .file_name()
+                .and_then(|n: &OsStr| n.to_str())
+                .unwrap_or("?");
             let age = compute_age(name, &now);
             output.push_str("  ⚠️  ");
             output.push_str(name);

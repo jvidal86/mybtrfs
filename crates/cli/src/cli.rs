@@ -47,8 +47,7 @@ fn default_log_path() -> Option<PathBuf> {
     }
     // Fall back to ~/.local/share/mybtrfs/logs/
     if let Ok(home) = std::env::var("HOME") {
-        let fallback = PathBuf::from(home)
-            .join(".local/share/mybtrfs/logs/mybtrfs.log");
+        let fallback = PathBuf::from(home).join(".local/share/mybtrfs/logs/mybtrfs.log");
         return Some(fallback);
     }
     None
@@ -67,12 +66,23 @@ fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
         use std::io::Write;
         // Color for errors & warnings
         let level_color = match record.level() {
-            log::Level::Error => "\x1b[31m",  // red
-            log::Level::Warn => "\x1b[33m",   // yellow
+            log::Level::Error => "\x1b[31m", // red
+            log::Level::Warn => "\x1b[33m",  // yellow
             _ => "",
         };
-        let reset = if level_color.is_empty() { "" } else { "\x1b[0m" };
-        writeln!(buf, "{}{}:{} {}", level_color, record.level(), reset, record.args())
+        let reset = if level_color.is_empty() {
+            ""
+        } else {
+            "\x1b[0m"
+        };
+        writeln!(
+            buf,
+            "{}{}:{} {}",
+            level_color,
+            record.level(),
+            reset,
+            record.args()
+        )
     });
     stderr_builder.target(env_logger::Target::Stderr);
     let stderr_handle = stderr_builder.build();
@@ -84,11 +94,7 @@ fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
-        if let Ok(file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-        {
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(log_path) {
             let mut file_builder = env_logger::Builder::new();
             // If --quiet: only errors/warnings to file. Otherwise: info and up.
             file_builder.filter_level(if *quiet {
@@ -116,8 +122,10 @@ fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
     }
 
     // Fallback: stderr only if log file can't be opened
-    log::set_boxed_logger(Box::new(SingleTargetLogger { logger: stderr_handle }))
-        .expect("logger already initialized");
+    log::set_boxed_logger(Box::new(SingleTargetLogger {
+        logger: stderr_handle,
+    }))
+    .expect("logger already initialized");
 }
 
 /// Combines two loggers: stderr for errors/warnings, file for everything.
@@ -366,6 +374,13 @@ enum Command {
     },
     /// Show aggregate backup statistics (snapshot/backup counts, sizes, space savings).
     Stats {
+        /// Directory holding the source-side snapshots.
+        snapshot_dir: PathBuf,
+        /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
+        target_dir: PathBuf,
+    },
+    /// Show backup health: snapshot/backup counts, latest ages, health checks.
+    Status {
         /// Directory holding the source-side snapshots.
         snapshot_dir: PathBuf,
         /// Target directory on the backup filesystem: a local path or remote `ssh://[user@]host[:port]/path`.
@@ -696,6 +711,22 @@ fn dispatch(cli: &Cli) -> Result<()> {
             print_stats(&stats);
             Ok(())
         }
+        Command::Status {
+            snapshot_dir,
+            target_dir,
+        } => {
+            let snapshot_dir = validate_path(snapshot_dir)?;
+            let target_dir = validate_path(target_dir)?;
+            use mybtrfs_application::status::StatusService;
+            let status = StatusService {
+                source_repo: &btrfs,
+                target_repo: &btrfs,
+            }
+            .report(&snapshot_dir, &target_dir)
+            .context("computing status failed")?;
+            print_status(&status);
+            Ok(())
+        }
         Command::Resume {
             snapshot_dir,
             basename,
@@ -811,7 +842,10 @@ fn command_mutates(command: &Command) -> bool {
     match command {
         Command::Run { .. } | Command::Snapshot { .. } | Command::Resume { .. } => true,
         Command::Prune { dry_run, .. } | Command::Restore { dry_run, .. } => !dry_run,
-        Command::List { .. } | Command::Stats { .. } | Command::ListDrives => false,
+        Command::List { .. }
+        | Command::Stats { .. }
+        | Command::Status { .. }
+        | Command::ListDrives => false,
     }
 }
 
@@ -976,6 +1010,7 @@ fn describe_command(command: &Command) -> String {
         ),
         Command::List { .. } => "list".to_owned(),
         Command::Stats { .. } => "stats".to_owned(),
+        Command::Status { .. } => "status".to_owned(),
         Command::ListDrives => "list-drives".to_owned(),
     }
 }
@@ -1041,11 +1076,17 @@ fn print_prune_report(report: &PruneReport, dry_run: bool) {
         println!();
         println!("Retention Policy Preview — Snapshot Side");
         println!("─────────────────────────────────────");
-        println!("{}", retention_preview::format_schedule(&report.snapshots_pruned));
+        println!(
+            "{}",
+            retention_preview::format_schedule(&report.snapshots_pruned)
+        );
         println!();
         println!("Retention Policy Preview — Backup Side");
         println!("─────────────────────────────────────");
-        println!("{}", retention_preview::format_schedule(&report.backups_pruned));
+        println!(
+            "{}",
+            retention_preview::format_schedule(&report.backups_pruned)
+        );
     } else {
         let verb = "pruned";
         println!(
@@ -1131,6 +1172,25 @@ fn print_stats(stats: &Stats) {
     println!("correlated:  {}", stats.correlated);
     println!("orphaned:    {}", stats.orphaned);
     println!("incomplete:  {}", stats.incomplete);
+}
+
+/// Print backup health status.
+fn print_status(report: &mybtrfs_application::status::StatusReport) {
+    println!("Status Report");
+    println!("────────────────────────────────────────────────");
+    println!("Source:      {}", report.source_dir.display());
+    println!("Target:      {}", report.target_dir.display());
+    println!();
+    println!(
+        "Snapshot count:  {} snapshot{}",
+        report.snapshots.len(),
+        if report.snapshots.len() == 1 { "" } else { "s" }
+    );
+    println!(
+        "Backup count:    {} backup{}",
+        report.backups.len(),
+        if report.backups.len() == 1 { "" } else { "s" }
+    );
 }
 
 /// Print the discovered btrfs filesystems (backup-target candidates).

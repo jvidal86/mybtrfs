@@ -36,6 +36,7 @@ mod retention_preview_e2e {
     }
 
     /// Parsed retention preview output (for easy assertion).
+    #[derive(Debug, PartialEq, Eq)]
     struct PreviewOutput {
         /// Snapshot paths in the PRESERVE section.
         preserve: Vec<String>,
