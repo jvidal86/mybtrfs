@@ -338,6 +338,12 @@ pub fn run() -> ExitCode {
     // Try /var/log/mybtrfs.log first, fall back to ~/.local/share/mybtrfs/logs/ if not writable.
     // --log-file overrides; use /dev/null to suppress.
     let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    // Custom format: just show the message without module path or level prefix
+    builder.format(|buf, record| {
+        use std::io::Write;
+        writeln!(buf, "{}", record.args())
+    });
+
     let log_path = cli.log_file.clone().or_else(|| default_log_path());
 
     if let Some(ref log_file) = log_path {
