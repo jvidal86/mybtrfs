@@ -54,7 +54,7 @@ impl ProgressPort for IndicatifProgress {
         let bar = ProgressBar::new(total);
         // Professional progress bar with block characters and percentage
         bar.set_style(
-            ProgressStyle::with_template("{msg}\n{bar:40.red/red} {percent}%")
+            ProgressStyle::with_template("{msg}\n{bar:40.cyan/blue} {percent}% complete")
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
         bar.set_message(msg.to_owned());
