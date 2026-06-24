@@ -1,0 +1,203 @@
+.TH MYBTRFS-RESUME 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-resume \- re-send the latest snapshot without creating a new one
+.SH SYNOPSIS
+.B mybtrfs resume
+[\fIOPTIONS\fR]
+\fISNAP_DIR BASENAME TARGET\fR
+.SH DESCRIPTION
+.B mybtrfs resume
+transfers the latest existing snapshot for
+.I BASENAME
+that has not yet been backed up to
+.IR TARGET ,
+then prunes per the retention policy. No new snapshot is created.
+.PP
+This is the recovery path for an interrupted
+.BR mybtrfs-run (1).
+If the previous run completed the snapshot but failed during transfer, resuming
+sends the snapshot that is already on disk rather than creating a duplicate.
+.PP
+If every snapshot for
+.I BASENAME
+already has a correlated backup on the target,
+.B resume
+is a no-op (nothing is transferred, retention still runs).
+.PP
+Transfer uses
+.B btrfs send \-p
+(incremental) when a correlated parent exists on the target, falling back to a
+full send otherwise. The received copy is verified after transfer (read-only,
+.BR received_uuid ,
+correct
+.BR parent_uuid )
+exactly as in
+.BR mybtrfs-run (1).
+.SH ARGUMENTS
+.TP
+.B SNAP_DIR
+Directory holding the source-side snapshots (same directory used by the
+preceding
+.BR mybtrfs-run (1)
+that was interrupted).
+.TP
+.B BASENAME
+Base name of the snapshot series to resume (e.g.,
+.BR home ,
+.BR data ).
+Only snapshots whose name begins with this basename are considered.
+.TP
+.B TARGET
+Backup destination: a local directory path or a remote
+.B ssh://[user@]host[:port]/path
+endpoint.
+.SH OPTIONS
+.TP
+.B \-\-incremental {yes|strict|no}
+Control
+.BR "btrfs send" (8)
+.B \-p
+behavior (default:
+.BR yes ).
+.RS
+.TP
+.B yes
+Use
+.B \-p
+(incremental) if a correlated parent exists, otherwise fall back to a full send.
+.TP
+.B strict
+Require a correlated parent; fail if none exists.
+.TP
+.B no
+Always send full (no
+.BR \-p ).
+.RE
+.TP
+.BR \-\-snapshot\-preserve\-min " \fISPEC\fR"
+Minimum snapshots to preserve (default:
+.BR all ).
+Values:
+.B all
+(keep everything),
+.B latest
+(keep only the newest),
+.B no
+(let retention tiers decide),
+or a count like
+.B 3d
+(keep at least 3 days' worth).
+.TP
+.BR \-\-snapshot\-preserve " \fISPEC\fR"
+Retention tiers for source snapshots (e.g.,
+.B "24h 7d 4w 12m"
+). See
+.BR mybtrfs-run (1)
+for format details.
+.TP
+.BR \-\-target\-preserve\-min " \fISPEC\fR"
+Minimum backups to preserve (default:
+.BR all ).
+Same values as
+.BR \-\-snapshot\-preserve\-min .
+.TP
+.BR \-\-target\-preserve " \fISPEC\fR"
+Retention tiers for backups.
+Same format as
+.BR \-\-snapshot\-preserve .
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations (e.g., creating missing directories).
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Append a timestamped audit line to the given file.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Use a custom run lock file (default: \fI<tmpdir>/mybtrfs-<uid>.lock\fR).
+A second run that finds the lock held exits with code 3.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated, one line per action:
+.EX
+transferred	/path/to/backup
+pruned	N	M
+.EE
+where N is snapshots deleted and M is backups deleted. If nothing was due
+(all snapshots already backed up), only the
+.B pruned
+line is emitted.
+.SH EXIT CODES
+.TP
+.B 0
+Resume completed successfully (including the no-op case).
+.TP
+.B 1
+Transfer or verification failed.
+.TP
+.B 2
+Usage error (bad arguments).
+.TP
+.B 3
+Run lock held by another invocation.
+.TP
+.B 4
+Permission denied (requires root). Re-run with
+.BR sudo (8).
+.SH EXAMPLES
+.TP
+Resume an interrupted backup:
+.EX
+sudo ./target/debug/mybtrfs resume /mnt/snapshots data /mnt/backup
+.EE
+.TP
+Resume with retention (enforce before returning):
+.EX
+sudo ./target/debug/mybtrfs resume /mnt/snapshots data /mnt/backup \\
+  --snapshot-preserve "7d 4w" --target-preserve "30d 12m"
+.EE
+.TP
+Resume to a remote SSH target:
+.EX
+sudo ./target/debug/mybtrfs resume /mnt/snapshots data \\
+  ssh://user@backup.example.com/backups/myhost
+.EE
+.TP
+Non-interactive for cron:
+.EX
+sudo ./target/debug/mybtrfs resume /mnt/snapshots data /mnt/backup \\
+  --yes --quiet --journal /var/log/mybtrfs.journal
+.EE
+.SH NOTES
+.TP
+\(bu
+.B resume
+never creates a new snapshot. If you want a fresh snapshot
+.I and
+a transfer, use
+.BR mybtrfs-run (1).
+.TP
+\(bu
+A snapshot is considered "already backed up" if a backup on the target shares
+its
+.B uuid
+as its
+.B received_uuid
+(btrfs UUID correlation). Broken or partial backups lacking a
+.B received_uuid
+are not counted and will be re-sent.
+.TP
+\(bu
+When the transfer is interrupted a second time,
+.B resume
+can be run again; it will pick the same snapshot and retry.
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR mybtrfs-prune (1),
+.BR btrfs-send (8),
+.BR btrfs-receive (8)
