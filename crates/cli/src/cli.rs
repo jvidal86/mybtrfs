@@ -53,6 +53,112 @@ fn default_log_path() -> Option<PathBuf> {
     None
 }
 
+/// Initialize dual-target logging: errors/warnings to stderr (with color),
+/// info/debug to log file. This ensures critical messages are always visible,
+/// even with `--quiet`, matching standard backup-tool behavior (btrbk, rsync, borg).
+fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
+    use std::fs::OpenOptions;
+
+    // Stderr target: errors & warnings (always shown, with color)
+    let mut stderr_builder = env_logger::Builder::from_default_env();
+    stderr_builder.filter_level(log::LevelFilter::Warn);
+    stderr_builder.format(|buf, record| {
+        use std::io::Write;
+        // Color for errors & warnings
+        let level_color = match record.level() {
+            log::Level::Error => "\x1b[31m",  // red
+            log::Level::Warn => "\x1b[33m",   // yellow
+            _ => "",
+        };
+        let reset = if level_color.is_empty() { "" } else { "\x1b[0m" };
+        writeln!(buf, "{}{}:{} {}", level_color, record.level(), reset, record.args())
+    });
+    stderr_builder.target(env_logger::Target::Stderr);
+    let stderr_handle = stderr_builder.build();
+
+    // File target: all messages (info/debug/warn/error), unless --quiet
+    if let Some(log_path) = log_file {
+        if let Some(parent) = log_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        if let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let mut file_builder = env_logger::Builder::new();
+            // If --quiet: only errors/warnings to file. Otherwise: info and up.
+            file_builder.filter_level(if *quiet {
+                log::LevelFilter::Warn
+            } else {
+                log::LevelFilter::Info
+            });
+            file_builder.format(|buf, record| {
+                use std::io::Write;
+                writeln!(buf, "{}", record.args())
+            });
+            file_builder.target(env_logger::Target::Pipe(Box::new(file)));
+            let file_handle = file_builder.build();
+
+            // Combine both targets
+            let max_level = std::cmp::max(stderr_handle.filter(), file_handle.filter());
+            log::set_max_level(max_level);
+            log::set_boxed_logger(Box::new(MultiTargetLogger {
+                stderr: stderr_handle,
+                file: file_handle,
+            }))
+            .expect("logger already initialized");
+            return;
+        }
+    }
+
+    // Fallback: stderr only if log file can't be opened
+    log::set_boxed_logger(Box::new(SingleTargetLogger { logger: stderr_handle }))
+        .expect("logger already initialized");
+}
+
+/// Combines two loggers: stderr for errors/warnings, file for everything.
+struct MultiTargetLogger {
+    stderr: env_logger::Logger,
+    file: env_logger::Logger,
+}
+
+impl log::Log for MultiTargetLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.stderr.enabled(metadata) || self.file.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.stderr.enabled(record.metadata()) {
+            self.stderr.log(record);
+        }
+        if self.file.enabled(record.metadata()) {
+            self.file.log(record);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Fallback logger when file target unavailable.
+struct SingleTargetLogger {
+    logger: env_logger::Logger,
+}
+
+impl log::Log for SingleTargetLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.logger.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        self.logger.log(record);
+    }
+
+    fn flush(&self) {}
+}
+
 /// Process exit codes (central table — RULES rule 14). Intentional divergence from btrbk:
 /// adds code 4 for permission errors for better UX in scripts/cron.
 mod exit_code {
@@ -337,37 +443,11 @@ pub fn run() -> ExitCode {
     // Initialize logging to a file by default (fallback strategy):
     // Try /var/log/mybtrfs.log first, fall back to ~/.local/share/mybtrfs/logs/ if not writable.
     // --log-file overrides; use /dev/null to suppress.
-    let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    // Custom format: just show the message without module path or level prefix
-    builder.format(|buf, record| {
-        use std::io::Write;
-        writeln!(buf, "{}", record.args())
-    });
-
+    // Dual-target logging: errors/warnings always go to stderr (even with --quiet),
+    // while info/debug go to the log file. This matches standard backup-tool
+    // behavior (btrbk, rsync, borg): critical info is always visible.
     let log_path = cli.log_file.clone().or_else(|| default_log_path());
-
-    if let Some(ref log_file) = log_path {
-        use std::fs::OpenOptions;
-        // Ensure parent directory exists
-        if let Some(parent) = log_file.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-        {
-            Ok(file) => {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
-            Err(e) => {
-                eprintln!("warning: could not open log file {}: {}", log_file.display(), e);
-            }
-        }
-    }
-    builder.init();
+    setup_dual_target_logger(&cli.quiet, log_path.as_deref());
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
