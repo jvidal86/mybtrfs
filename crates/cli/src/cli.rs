@@ -485,9 +485,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
             Ok(())
         }
         Command::ListDrives => {
+            progress.start_spinner("Scanning drives…");
             let drives = LsblkDriveDiscovery::new()
                 .detect()
                 .context("drive discovery failed")?;
+            progress.finish("");
             print_drives(&drives);
             Ok(())
         }
