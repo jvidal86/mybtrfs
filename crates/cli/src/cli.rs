@@ -297,6 +297,14 @@ enum Command {
         snapshot_dir: PathBuf,
         /// Base name for the snapshot (a timestamp is appended).
         basename: String,
+        /// Shell command to run before creating the snapshot (via `sh -c`).
+        /// Abort if it exits non-zero (snapshot is not created).
+        #[arg(long, value_name = "CMD")]
+        pre_snapshot_hook: Option<String>,
+        /// Shell command to run after the snapshot is created (via `sh -c`).
+        /// Always runs even if a later step fails (use for DB unfreeze etc.).
+        #[arg(long, value_name = "CMD")]
+        post_snapshot_hook: Option<String>,
     },
     /// Full backup: snapshot the source, send/receive to the target (local or remote SSH), then prune.
     Run {
@@ -316,6 +324,16 @@ enum Command {
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
         incremental: IncrementalArg,
+        /// Shell command to run before creating the snapshot (via `sh -c`).
+        /// Abort if it exits non-zero (snapshot is not created).
+        /// For backup-set runs, override per-entry with `pre_snapshot_hook` in the file.
+        #[arg(long, value_name = "CMD")]
+        pre_snapshot_hook: Option<String>,
+        /// Shell command to run after the snapshot is created (via `sh -c`).
+        /// Always runs even if a later step fails (use for DB unfreeze etc.).
+        /// For backup-set runs, override per-entry with `post_snapshot_hook` in the file.
+        #[arg(long, value_name = "CMD")]
+        post_snapshot_hook: Option<String>,
         #[command(flatten)]
         retention: RetentionArgs,
     },
@@ -449,6 +467,72 @@ impl RetentionArgs {
     /// Parse the target-side policy from its btrbk-style strings.
     fn target_policy(&self) -> Result<RetentionPolicy> {
         parse_policy(&self.target_preserve_min, &self.target_preserve)
+    }
+}
+
+/// Run a shell hook command (`sh -c <cmd>`), logging the label before spawn.
+///
+/// # Errors
+/// Returns an error if the process cannot be spawned or exits with a non-zero status.
+fn run_hook(label: &str, cmd: &str) -> Result<()> {
+    log::info!("running {label} hook: {cmd}");
+    let status = std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .status()
+        .with_context(|| format!("failed to spawn {label} hook"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{label} hook failed with exit status {:?}",
+            status.code()
+        ))
+    }
+}
+
+/// Ensures the post-snapshot hook always runs, even when the main operation
+/// returns an error.
+///
+/// Call [`PostHookGuard::finish`] on the happy path so the hook error can be
+/// propagated to the caller. The [`Drop`] impl is the safety net for the error
+/// path: it runs the hook and logs a warning instead of propagating (you are
+/// already handling another error at that point).
+struct PostHookGuard {
+    cmd: Option<String>,
+    ran: bool,
+}
+
+impl PostHookGuard {
+    fn new(cmd: Option<String>) -> Self {
+        Self { cmd, ran: false }
+    }
+
+    /// Run the post-hook explicitly on the success path.
+    ///
+    /// Marks the guard done so the [`Drop`] impl is a no-op, then runs the
+    /// hook and propagates any error.
+    ///
+    /// # Errors
+    /// Returns an error if the hook exits with a non-zero status.
+    fn finish(mut self) -> Result<()> {
+        self.ran = true;
+        if let Some(cmd) = &self.cmd {
+            run_hook("post-snapshot", cmd)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PostHookGuard {
+    fn drop(&mut self) {
+        if self.ran {
+            return;
+        }
+        if let Some(cmd) = &self.cmd {
+            if let Err(e) = run_hook("post-snapshot", cmd) {
+                log::warn!("post-snapshot hook failed during error recovery: {e}");
+            }
+        }
     }
 }
 
@@ -656,10 +740,16 @@ fn dispatch(cli: &Cli) -> Result<()> {
             source,
             snapshot_dir,
             basename,
+            pre_snapshot_hook,
+            post_snapshot_hook,
         } => {
             let source = validate_path(source)?;
             ensure_dir(&localfs, prompter.as_ref(), snapshot_dir)?;
             let snapshot_dir = validate_path(snapshot_dir)?;
+            if let Some(cmd) = pre_snapshot_hook.as_deref() {
+                run_hook("pre-snapshot", cmd)?;
+            }
+            let post_guard = PostHookGuard::new(post_snapshot_hook.clone());
             // Snapshotting doesn't send, so the incremental mode is irrelevant.
             let snapshot = backup_with(Incremental::Yes)
                 .snapshot(&source, &snapshot_dir, basename)
@@ -668,6 +758,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 "created snapshot: {}",
                 snapshot.mountpoint.join(&snapshot.path).display()
             );
+            post_guard.finish()?;
             Ok(())
         }
         Command::Run {
@@ -677,6 +768,8 @@ fn dispatch(cli: &Cli) -> Result<()> {
             target_dir,
             set,
             incremental,
+            pre_snapshot_hook,
+            post_snapshot_hook,
             retention: retention_args,
         } => {
             let snapshot_policy = retention_args.snapshot_policy()?;
@@ -702,6 +795,22 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     let source_val = validate_path(&entry.source)?;
                     ensure_dir(&localfs, prompter.as_ref(), &entry.snapshot_dir)?;
                     let snapshot_dir_val = validate_path(&entry.snapshot_dir)?;
+
+                    let pre_hook = entry
+                        .pre_snapshot_hook
+                        .as_deref()
+                        .or(pre_snapshot_hook.as_deref());
+                    let post_hook = entry
+                        .post_snapshot_hook
+                        .clone()
+                        .or_else(|| post_snapshot_hook.clone());
+
+                    if let Some(cmd) = pre_hook {
+                        run_hook("pre-snapshot", cmd).with_context(|| {
+                            format!("backup-set entry {}: pre-snapshot hook failed", idx + 1)
+                        })?;
+                    }
+                    let post_guard = PostHookGuard::new(post_hook);
 
                     let entry_snapshot_policy = entry_policy(
                         entry.snapshot_preserve_min.as_deref(),
@@ -775,6 +884,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     }
                     .context(format!("backup-set entry {} failed", idx + 1))?;
                     print_run_report(&_report);
+                    post_guard.finish().with_context(|| {
+                        format!("backup-set entry {}: post-snapshot hook failed", idx + 1)
+                    })?;
                 }
                 Ok(())
             } else {
@@ -798,6 +910,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 let source = validate_path(&source_val)?;
                 ensure_dir(&localfs, prompter.as_ref(), &snapshot_dir_val)?;
                 let snapshot_dir = validate_path(&snapshot_dir_val)?;
+
+                if let Some(cmd) = pre_snapshot_hook.as_deref() {
+                    run_hook("pre-snapshot", cmd)?;
+                }
+                let post_guard = PostHookGuard::new(post_snapshot_hook.clone());
 
                 // Resolve the target: an explicit local dir, an `ssh://` remote
                 // endpoint, or (when omitted) an interactively-picked drive with a
@@ -853,6 +970,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
                 }
                 .context("backup run failed")?;
                 print_run_report(&report);
+                post_guard.finish()?;
                 Ok(())
             }
         }
@@ -1890,14 +2008,18 @@ mod tests {
                 incremental,
                 retention,
                 set,
+                pre_snapshot_hook,
+                post_snapshot_hook,
             } => {
                 assert_eq!(source, Some(PathBuf::from("/mnt/pool/home")));
                 assert_eq!(snapshot_dir, Some(PathBuf::from("/mnt/pool/.snapshots")));
                 assert_eq!(basename, Some("home".to_string()));
                 assert_eq!(target_dir, Some(PathBuf::from("/mnt/drive/host")));
                 assert_eq!(set, None);
-                // Defaults: incremental on, keep-all retention.
+                // Defaults: incremental on, no hooks, keep-all retention.
                 assert_eq!(incremental, IncrementalArg::Yes);
+                assert_eq!(pre_snapshot_hook, None);
+                assert_eq!(post_snapshot_hook, None);
                 assert_eq!(retention.snapshot_preserve_min, "all");
                 assert_eq!(retention.snapshot_preserve, "");
             }
@@ -2188,5 +2310,70 @@ mod tests {
     #[test]
     fn entry_incremental_errors_on_unknown_value() {
         assert!(entry_incremental(Some("maybe"), Incremental::Yes).is_err());
+    }
+
+    #[test]
+    fn hook_runs_command_successfully() {
+        assert!(run_hook("pre-snapshot", "true").is_ok());
+    }
+
+    #[test]
+    fn hook_returns_error_on_nonzero_exit() {
+        let err = run_hook("pre-snapshot", "false").unwrap_err();
+        assert!(err.to_string().contains("pre-snapshot"));
+    }
+
+    #[test]
+    fn post_hook_guard_runs_on_drop_when_finish_not_called() {
+        use std::sync::{Arc, Mutex};
+        let ran = Arc::new(Mutex::new(false));
+        let ran_clone = ran.clone();
+        // PostHookGuard wraps a shell command; we can't inject a closure,
+        // so we test the drop path via a temp file written by the hook.
+        let tmp = std::env::temp_dir().join("mybtrfs_test_post_hook_guard");
+        let _ = std::fs::remove_file(&tmp);
+        let cmd = format!("touch {}", tmp.display());
+        {
+            let _guard = PostHookGuard::new(Some(cmd));
+            // Drop without calling finish() — simulates an early return.
+            *ran_clone.lock().unwrap() = true;
+        } // drop fires here
+        assert!(tmp.exists(), "post-hook did not run on drop");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn post_hook_guard_finish_runs_hook_and_marks_done() {
+        let tmp = std::env::temp_dir().join("mybtrfs_test_post_hook_finish");
+        let _ = std::fs::remove_file(&tmp);
+        let cmd = format!("touch {}", tmp.display());
+        let guard = PostHookGuard::new(Some(cmd));
+        guard.finish().unwrap();
+        assert!(tmp.exists(), "post-hook did not run via finish()");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn post_hook_guard_finish_does_not_double_run() {
+        // finish() marks ran; subsequent drop should be a no-op.
+        // We verify by using a command that fails on second run
+        // (here, removing a file that only exists once).
+        let tmp = std::env::temp_dir().join("mybtrfs_test_post_hook_nodup");
+        std::fs::write(&tmp, b"").unwrap();
+        // "rm -f" never fails, so use a command that appends to a counter file instead.
+        let counter = std::env::temp_dir().join("mybtrfs_test_post_hook_counter");
+        let _ = std::fs::remove_file(&counter);
+        let cmd = format!("echo x >> {}", counter.display());
+        let guard = PostHookGuard::new(Some(cmd));
+        guard.finish().unwrap();
+        // Drop runs here but should be a no-op (ran = true).
+        let count = std::fs::read_to_string(&counter).unwrap_or_default();
+        assert_eq!(
+            count.trim().lines().count(),
+            1,
+            "post-hook ran more than once"
+        );
+        let _ = std::fs::remove_file(&counter);
+        let _ = std::fs::remove_file(&tmp);
     }
 }

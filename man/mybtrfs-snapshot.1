@@ -36,6 +36,20 @@ Base name for the snapshot (e.g.,
 .B \-\-yes
 Assume "yes" to all confirmations (e.g., creating missing directories).
 .TP
+.BR \-\-pre\-snapshot\-hook " \fICMD\fR"
+Shell command to run (via
+.BR "sh -c" )
+before creating the snapshot.
+If the command exits non-zero, the snapshot is not created.
+Typical use: quiesce a database or flush writes before the atomic snapshot.
+.TP
+.BR \-\-post\-snapshot\-hook " \fICMD\fR"
+Shell command to run (via
+.BR "sh -c" )
+after the snapshot is created.
+.B Always runs
+even if the snapshot step itself failed, so unfreeze / cleanup commands are guaranteed.
+.TP
 .B \-q, \-\-quiet
 Suppress progress indicators and summary output.
 .TP
@@ -69,6 +83,13 @@ sudo mybtrfs snapshot /mnt/data /mnt/snapshots data
 Non-interactive (for cron):
 .EX
 sudo mybtrfs snapshot /mnt/data /mnt/snapshots data --yes --quiet
+.EE
+.TP
+With DB quiesce hooks (precise freeze window — snapshot only, not transfer):
+.EX
+sudo mybtrfs snapshot /mnt/data /mnt/snapshots data \\
+  --pre-snapshot-hook "systemctl stop mydb && sync" \\
+  --post-snapshot-hook "systemctl start mydb"
 .EE
 .SH NOTES
 .TP

@@ -110,6 +110,27 @@ Same format as
 .B \-\-yes
 Assume "yes" to all confirmations (e.g., creating missing directories).
 .TP
+.BR \-\-pre\-snapshot\-hook " \fICMD\fR"
+Shell command to run (via
+.BR "sh -c" )
+before creating the snapshot.
+If the command exits non-zero, the run is aborted and no snapshot is created.
+Typical use: quiesce a database or flush writes.
+For backup-set runs, individual entries can override this with
+.B pre_snapshot_hook
+in the file.
+.TP
+.BR \-\-post\-snapshot\-hook " \fICMD\fR"
+Shell command to run (via
+.BR "sh -c" )
+after the snapshot is created.
+.B Always runs
+even if a subsequent step (transfer, prune) fails, so database unfreeze
+commands are guaranteed to execute.
+For backup-set runs, individual entries can override this with
+.B post_snapshot_hook
+in the file.
+.TP
 .B \-q, \-\-quiet
 Suppress progress indicators and summary output.
 .TP
@@ -138,6 +159,8 @@ basename = "data"
 target_dir = "/mnt/backup"
 incremental = "yes"
 snapshot_preserve_daily = 7
+pre_snapshot_hook = "sync && freeze-db.sh"
+post_snapshot_hook = "unfreeze-db.sh"
 
 [[backup]]
 source = "/mnt/home"
@@ -149,7 +172,16 @@ target_preserve_daily = 365
 .EE
 .PP
 All fields match the command-line arguments.
-Optional retention fields override command-line defaults for that entry.
+Optional retention and hook fields override command-line defaults for that entry.
+If
+.B pre_snapshot_hook
+or
+.B post_snapshot_hook
+is absent from an entry, the value from the command-line
+.B \-\-pre\-snapshot\-hook
+/
+.B \-\-post\-snapshot\-hook
+flags applies (if set).
 .SH RETENTION POLICIES
 Retention uses Grandfather-Father-Son (GFS) scheduling.
 Specify tiers as:
@@ -230,6 +262,13 @@ Strict incremental (fail if no parent found):
 .EX
 sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
   --incremental strict
+.EE
+.TP
+With pre/post hooks (quiesce a service around snapshot creation):
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
+  --pre-snapshot-hook "systemctl stop mydb && sync" \\
+  --post-snapshot-hook "systemctl start mydb"
 .EE
 .TP
 Remote backup via SSH:

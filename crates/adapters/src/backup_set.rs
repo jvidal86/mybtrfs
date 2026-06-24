@@ -32,6 +32,10 @@ pub struct BackupEntry {
     pub target_preserve_weekly: Option<usize>,
     pub target_preserve_monthly: Option<usize>,
     pub target_preserve_yearly: Option<usize>,
+    /// Shell command run before creating the snapshot (via `sh -c`); overrides the CLI flag.
+    pub pre_snapshot_hook: Option<String>,
+    /// Shell command run after the snapshot is created (via `sh -c`); overrides the CLI flag.
+    pub post_snapshot_hook: Option<String>,
 }
 
 /// Parse a TOML backup-set file into a list of backup entries.
@@ -156,6 +160,15 @@ pub fn parse_backup_set(content: &str) -> Result<Vec<BackupEntry>, String> {
                 .and_then(|v| v.as_integer())
                 .map(|n| n as usize);
 
+            let pre_snapshot_hook = obj
+                .get("pre_snapshot_hook")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let post_snapshot_hook = obj
+                .get("post_snapshot_hook")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
             entries.push(BackupEntry {
                 source,
                 snapshot_dir,
@@ -174,6 +187,8 @@ pub fn parse_backup_set(content: &str) -> Result<Vec<BackupEntry>, String> {
                 target_preserve_weekly,
                 target_preserve_monthly,
                 target_preserve_yearly,
+                pre_snapshot_hook,
+                post_snapshot_hook,
             });
         }
     }
@@ -265,5 +280,41 @@ snapshot_dir = "/snapshots"
         let toml = "";
         let err = parse_backup_set(toml).unwrap_err();
         assert_eq!(err, "no [[backup]] entries found");
+    }
+
+    #[test]
+    fn parse_with_snapshot_hooks() {
+        let toml = r#"
+[[backup]]
+source = "/data"
+snapshot_dir = "/snapshots"
+basename = "data"
+target_dir = "/backup"
+pre_snapshot_hook = "sync && freeze-db.sh"
+post_snapshot_hook = "unfreeze-db.sh"
+"#;
+        let entries = parse_backup_set(toml).unwrap();
+        assert_eq!(
+            entries[0].pre_snapshot_hook,
+            Some("sync && freeze-db.sh".to_string())
+        );
+        assert_eq!(
+            entries[0].post_snapshot_hook,
+            Some("unfreeze-db.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn hooks_are_none_when_absent() {
+        let toml = r#"
+[[backup]]
+source = "/data"
+snapshot_dir = "/snapshots"
+basename = "data"
+target_dir = "/backup"
+"#;
+        let entries = parse_backup_set(toml).unwrap();
+        assert!(entries[0].pre_snapshot_hook.is_none());
+        assert!(entries[0].post_snapshot_hook.is_none());
     }
 }
