@@ -4,6 +4,7 @@
 pub mod ports;
 
 pub mod backup;
+pub mod diff;
 pub mod inventory;
 pub mod prune;
 pub mod restore;
