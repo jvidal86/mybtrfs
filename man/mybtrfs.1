@@ -1,0 +1,214 @@
+.TH MYBTRFS 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs \- btrfs-native backup tool with incremental send/receive and GFS retention
+.SH SYNOPSIS
+.B mybtrfs
+[\fIOPTIONS\fR]
+\fICOMMAND\fR
+.SH DESCRIPTION
+.B mybtrfs
+is a Rust reimagining of
+.BR btrbk (1),
+a backup tool for btrfs subvolumes. It creates read-only snapshots,
+sends/receives them incrementally to a target filesystem (local or remote SSH),
+and manages retention with Grandfather-Father-Son (GFS) policies.
+.PP
+All state is stateless: every run re-derives the backup graph from live btrfs metadata
+(UUIDs), never from a side database. Subvolume relationships are resolved from
+.BR "btrfs subvolume show" (8)
+output, and the tool verifies every transfer by checking the received UUID.
+.PP
+.B mybtrfs
+is CLI-first (not config-file-driven). Backups are invoked via command-line arguments
+or a multi-job
+.B backup-set
+TOML file (see
+.BR mybtrfs-run (1)).
+.SH OPTIONS
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations (e.g., creating missing directories).
+Use for non-interactive / cron scripts.
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and post-run summary. Useful for cron / scripting.
+Progress is also suppressed automatically when stderr is not a TTY.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Append a timestamped audit line to the journal file for this invocation.
+Useful for tracking backup history. Creates parent directories if needed.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Advisory flock file serializing mutating runs. Default: \fI<tmpdir>/mybtrfs-<uid>.lock\fR.
+A second run that finds the lock held exits immediately with code 3.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write logs to a file instead of stderr (frees stderr for progress indicators).
+Default: \fI/var/log/mybtrfs.log\fR (or \fI~/.local/share/mybtrfs/logs/mybtrfs.log\fR if not writable).
+Use \fI/dev/null\fR to suppress logging.
+.TP
+.B \-h, \-\-help
+Print help message.
+.TP
+.B \-V, \-\-version
+Print version number.
+.SH COMMANDS
+.TP
+.B snapshot \fISRC SNAP_DIR BASENAME\fR
+Create a read-only snapshot of a source subvolume.
+See
+.BR mybtrfs-snapshot (1).
+.TP
+.B run \fISRC SNAP_DIR BASENAME [TARGET]\fR
+Full backup: snapshot, send/receive to target, then prune per retention policy.
+See
+.BR mybtrfs-run (1).
+.TP
+.B resume \fISNAP_DIR BASENAME TARGET\fR
+Resume an incomplete backup without creating a new snapshot.
+See
+.BR mybtrfs-resume (1).
+.TP
+.B prune \fISNAP_DIR TARGET\fR
+Prune snapshots and backups per retention policy.
+See
+.BR mybtrfs-prune (1).
+.TP
+.B restore \fIBACKUP DEST\fR
+Restore a backup to a writable subvolume.
+See
+.BR mybtrfs-restore (1).
+.TP
+.B list \fISNAP_DIR TARGET\fR
+List source snapshots with their correlated backups.
+See
+.BR mybtrfs-list (1).
+.TP
+.B stats \fISNAP_DIR TARGET\fR
+Show aggregate backup statistics (counts, sizes, space savings).
+See
+.BR mybtrfs-stats (1).
+.TP
+.B status \fISNAP_DIR TARGET\fR
+Show backup health: snapshot/backup counts, latest ages, journal-backed history.
+See
+.BR mybtrfs-status (1).
+.TP
+.B diff \fIOLDER_SNAP NEWER_SNAP\fR
+Estimate changed bytes between two snapshots (predicts incremental size).
+See
+.BR mybtrfs-diff (1).
+.TP
+.B list\-drives
+List candidate btrfs filesystems for backup targets.
+.TP
+.B list\-subvolumes
+List every btrfs subvolume across all mounted btrfs filesystems.
+.SH EXIT CODES
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Generic failure (command could not complete).
+.TP
+.B 2
+Usage error (bad arguments or malformed input).
+.TP
+.B 3
+Run lock held by another invocation.
+.TP
+.B 4
+Permission denied: operation requires root privileges. Re-run with
+.BR sudo (8).
+.SH EXAMPLES
+.TP
+Full backup to a discovered drive (interactive):
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data
+.EE
+.TP
+Backup to an explicit target with retention:
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
+  --snapshot-preserve-daily 7 --target-preserve-daily 30
+.EE
+.TP
+Backup to a remote SSH target:
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data ssh://user@backup.example.com/path
+.EE
+.TP
+Multi-subvolume backup from a backup-set file:
+.EX
+sudo mybtrfs run --set /etc/mybtrfs.backup-set.toml
+.EE
+.TP
+Check backup health:
+.EX
+sudo mybtrfs status /mnt/snapshots /mnt/backup
+.EE
+.TP
+Preview what retention would delete (dry-run):
+.EX
+sudo mybtrfs prune --dry-run /mnt/snapshots /mnt/backup \\
+  --snapshot-preserve-daily 7
+.EE
+.SH SAFETY INVARIANTS
+mybtrfs enforces the following guarantees:
+.TP
+1. Send/receive verification
+Never trust a transfer by exit code alone. After every receive,
+mybtrfs verifies the target is read-only, carries a
+.B received_uuid,
+and has the correct
+.B parent_uuid.
+.TP
+2. Delete-safety anchors
+Snapshots and backups critical to incremental chains are preserved.
+The just-created snapshot and the latest common pair are never deleted.
+If any target becomes unreachable during a run, snapshot deletion is skipped entirely.
+.TP
+3. Restore read-only trap
+Never flips read-only via
+.BR "btrfs property set" (8),
+which silently breaks future incremental backups.
+Writable snapshots are created via
+.BR "btrfs subvolume snapshot" (8)
+without the \fB-r\fR flag.
+.TP
+4. Stateless and idempotent
+All truth is re-derived from live btrfs metadata each run.
+Snapshots and backups are named with timestamps and collision counters.
+Non-matching names are left untouched.
+Duplicate UUIDs are hard-refused (cloned-disk guard).
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Enable detailed logging. Set to
+.B debug
+or
+.B trace
+for verbose output (inspect with
+.BR lnav (1)
+or
+.BR tail (1)).
+Example:
+.EX
+RUST_LOG=debug sudo mybtrfs run ...
+.EE
+.SH SEE ALSO
+.BR mybtrfs-run (1),
+.BR mybtrfs-prune (1),
+.BR mybtrfs-restore (1),
+.BR mybtrfs-status (1),
+.BR btrfs (8),
+.BR btrfs-subvolume (8),
+.BR btrbk (1)
+.SH DOCUMENTATION
+Full design and architecture documentation is available in the repository:
+.BR https://github.com/jvidal86/mybtrfs/tree/main/documentation
+.SH LICENSE
+GPL-3.0-or-later. See LICENSE file in the repository.
+.SH AUTHOR
+J Vidal (j.vidal.rodriguez@gmail.com)

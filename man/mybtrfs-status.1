@@ -1,0 +1,158 @@
+.TH MYBTRFS-STATUS 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-status \- show backup health: snapshot/backup counts, latest ages, journal-backed history
+.SH SYNOPSIS
+.B mybtrfs status
+[\fIOPTIONS\fR]
+\fISNAP_DIR TARGET\fR
+.SH DESCRIPTION
+.B mybtrfs status
+displays backup health and operational history.
+Provides:
+.TP
+\(bu
+Count of source snapshots and target backups
+.TP
+\(bu
+Latest snapshot/backup age and timestamp
+.TP
+\(bu
+Health check: whether source and target are in sync
+.TP
+\(bu
+Journal-backed last-run history (if
+.B --journal
+is configured)
+.PP
+Useful for monitoring; run regularly to verify backup operations are completing.
+.SH ARGUMENTS
+.TP
+.B SNAP_DIR
+Directory containing source snapshots.
+.TP
+.B TARGET
+Backup target: local directory path or remote
+.B ssh://[user@]host[:port]/path.
+.SH OPTIONS
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators. Only the status table is printed.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Read invocation history from an audit file for last-run details.
+If set during
+.BR mybtrfs-run (1),
+every backup logs a timestamped entry here.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated format (header + data rows):
+.EX
+source	/mnt/snapshots
+target	/mnt/backup
+snapshots	5
+backups	5
+latest_snapshot	data.20260624T1803	2m ago
+latest_backup	data.20260624T1803	2m ago
+health	in-sync
+last_run	2026-06-24T18:05:32	run
+.EE
+.PP
+Fields:
+.TP
+.B source
+Path to the snapshot directory.
+.TP
+.B target
+Path to the backup target.
+.TP
+.B snapshots
+Count of source snapshots.
+.TP
+.B backups
+Count of backups on the target.
+.TP
+.B latest_snapshot
+Name and age of the newest source snapshot.
+.TP
+.B latest_backup
+Name and age of the newest backup.
+.TP
+.B health
+.B in-sync
+if latest snapshot and backup have the same name/age;
+.B out-of-sync
+if they differ (e.g., source has new changes but backup is older).
+.TP
+.B last_run
+(Optional) Timestamp and command from the journal (e.g.,
+.BR "2026-06-24T18:05:32	run").
+.SH EXIT CODES
+.TP
+.B 0
+Status retrieved successfully.
+.TP
+.B 1
+Status check failed (e.g., snapshot dir not found).
+.TP
+.B 2
+Usage error.
+.TP
+.B 4
+Permission denied (requires root for snapshot inspection).
+.SH EXAMPLES
+.TP
+Check backup health:
+.EX
+sudo mybtrfs status /mnt/snapshots /mnt/backup
+.EE
+.TP
+Check health with journal history:
+.EX
+sudo mybtrfs status /mnt/snapshots /mnt/backup \\
+  --journal /var/log/mybtrfs.journal
+.EE
+.TP
+Monitor a remote backup:
+.EX
+sudo mybtrfs status /mnt/snapshots ssh://backup.example.com/data
+.EE
+.TP
+Scripted check (quiet mode, tab-separated):
+.EX
+sudo mybtrfs status --quiet /mnt/snapshots /mnt/backup | \\
+  awk -F\\\\t '$6 == "out-of-sync" { print "WARNING: backup is stale" }'
+.EE
+.SH NOTES
+.TP
+\(bu
+Journal history requires that
+.BR mybtrfs-run (1)
+was invoked with
+.B --journal
+in the past.
+.TP
+\(bu
+Age formatting: "just now", "2m ago", "3h ago", "1d ago", etc.
+.TP
+\(bu
+.B health
+is a heuristic: it checks if the latest names match, not whether all data is synchronized.
+.TP
+\(bu
+Remote backups (
+.B ssh://
+) are inspected over SSH; the status reflects the remote state.
+.SH MONITORING & CRON
+Typical cron setup to monitor backup health daily:
+.EX
+0 8 * * * sudo mybtrfs status /mnt/snapshots /mnt/backup \\
+  --journal /var/log/mybtrfs.journal | grep out-of-sync && \\
+  mail -s "Backup is stale" ops@example.com
+.EE
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR mybtrfs-list (1),
+.BR mybtrfs-stats (1)

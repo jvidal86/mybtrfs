@@ -1,0 +1,165 @@
+.TH MYBTRFS-RESTORE 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-restore \- restore a backup to a writable subvolume
+.SH SYNOPSIS
+.B mybtrfs restore
+[\fIOPTIONS\fR]
+\fIBACKUP DEST\fR
+.SH DESCRIPTION
+.B mybtrfs restore
+recovers data from a read-only backup (received subvolume) by creating a
+writable copy.
+.PP
+The process:
+.TP
+1. Transfer the backup from remote to local (if needed, e.g.,
+.B ssh://
+backup).
+.TP
+2. Create a writable snapshot via
+.BR "btrfs subvolume snapshot" (8)
+without
+.B -r
+(never use
+.BR "btrfs property set ro=false" (8),
+which silently breaks future incrementals).
+.TP
+3. Clean up any temporary copies.
+.PP
+If
+.B DEST
+already exists and
+.B --force
+is not set, the operation is refused.
+With
+.B --force,
+the existing destination is moved to
+.B <DEST>.broken
+and the restore proceeds.
+.SH ARGUMENTS
+.TP
+.B BACKUP
+Path to a read-only backup subvolume (local or remote
+.B ssh://[user@]host[:port]/path).
+.TP
+.B DEST
+Where to create the writable restored subvolume. Must be on a btrfs filesystem.
+.SH OPTIONS
+.TP
+.B \-\-force
+If
+.B DEST
+exists, move it aside to
+.B <DEST>.broken[_N]
+(with collision counter) instead of refusing.
+.TP
+.B \-\-dry-run
+Show the intended plan (move-aside + writable snapshot) without creating
+or moving anything.
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations.
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Log invocation to an audit file.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Use a custom run lock file.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated format showing the restore plan:
+.EX
+restored	/path/to/writable/subvolume
+.EE
+.PP
+If an existing destination was moved aside:
+.EX
+move_aside	/path/to/moved_backup
+.EE
+.SH EXIT CODES
+.TP
+.B 0
+Restore completed successfully.
+.TP
+.B 1
+Restore failed (e.g., snapshot creation error).
+.TP
+.B 2
+Usage error.
+.TP
+.B 3
+Run lock held.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+Simple restore from a local backup:
+.EX
+sudo mybtrfs restore /mnt/backup/data.20260624T1803 /mnt/data_restored
+.EE
+.TP
+Restore from a remote backup (transferred locally first):
+.EX
+sudo mybtrfs restore ssh://backup.example.com/data/home.20260624T1803 \\
+  /mnt/home_restored
+.EE
+.TP
+Force overwrite an existing destination:
+.EX
+sudo mybtrfs restore /mnt/backup/data.20260624T1803 /mnt/data_restored \\
+  --force
+.EE
+.TP
+Dry-run (preview the plan):
+.EX
+sudo mybtrfs restore /mnt/backup/data.20260624T1803 /mnt/data_restored \\
+  --dry-run
+.EE
+.SH NOTES
+.TP
+\(bu
+The restored subvolume is writable and fully independent from the backup.
+.TP
+\(bu
+If the backup was an incremental (has a
+.B parent_uuid),
+the restored copy is still valid; it carries the same data.
+.TP
+\(bu
+The destination must be on a btrfs filesystem (same or different from the backup).
+.TP
+\(bu
+Remote backups (
+.B ssh://
+) are transferred to the local system before creating the writable copy.
+.TP
+\(bu
+After restore, the original backup remains unchanged and read-only.
+.SH SAFETY
+.TP
+\(bu
+Never use
+.BR "btrfs property set ro=false" (8)
+to make a backup writable; it silently corrupts the
+.B received_uuid
+and breaks future incrementals.
+.B mybtrfs restore
+always uses
+.BR "btrfs subvolume snapshot" (8),
+which is the only safe path to a writable copy.
+.TP
+\(bu
+If the destination exists,
+.B --force
+is required; otherwise the operation is refused (safety against accidental overwrites).
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR btrfs-subvolume (8),
+.BR ssh (1)

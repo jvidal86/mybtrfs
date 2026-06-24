@@ -1,0 +1,68 @@
+.TH MYBTRFS-LIST 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-list \- list source snapshots with their correlated backups
+.SH SYNOPSIS
+.B mybtrfs list
+[\fIOPTIONS\fR]
+\fISNAP_DIR TARGET\fR
+.SH DESCRIPTION
+.B mybtrfs list
+displays an inventory of source snapshots and their corresponding backups,
+organized by snapshot with child backups indented below.
+.PP
+Each snapshot is correlated with its backups by matching UUIDs and parent relationships.
+A snapshot with no backup is marked as unsynced; a backup with no source snapshot
+is marked as orphaned.
+.SH ARGUMENTS
+.TP
+.B SNAP_DIR
+Directory containing source snapshots.
+.TP
+.B TARGET
+Backup target: local directory path or remote
+.B ssh://[user@]host[:port]/path.
+.SH OPTIONS
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and headers. Tab-separated output only.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Human-readable hierarchical list (or tab-separated if
+.B --quiet):
+.EX
+snapshot	data.20260624T1803
+backup	data.20260624T1803
+snapshot	data.20260623T1803
+backup	data.20260623T1803
+backup	data.20260623T1500 (orphaned)
+.EE
+.SH EXIT CODES
+.TP
+.B 0
+List retrieved successfully.
+.TP
+.B 1
+List failed (e.g., snapshot dir not found).
+.TP
+.B 2
+Usage error.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+List all snapshots and backups:
+.EX
+sudo mybtrfs list /mnt/snapshots /mnt/backup
+.EE
+.TP
+List in quiet mode for scripting:
+.EX
+sudo mybtrfs list --quiet /mnt/snapshots /mnt/backup | grep snapshot
+.EE
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-status (1),
+.BR mybtrfs-stats (1)

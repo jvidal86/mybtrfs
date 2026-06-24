@@ -1,0 +1,90 @@
+.TH MYBTRFS-SNAPSHOT 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-snapshot \- create a read-only snapshot of a source subvolume
+.SH SYNOPSIS
+.B mybtrfs snapshot
+[\fIOPTIONS\fR]
+\fISRC SNAP_DIR BASENAME\fR
+.SH DESCRIPTION
+.B mybtrfs snapshot
+creates a read-only snapshot of a btrfs subvolume without performing a backup transfer.
+This is the first step of
+.BR mybtrfs-run (1),
+but can be called independently for testing or manual workflows.
+.PP
+Snapshots are named as:
+.B <BASENAME>.<TIMESTAMP>[_N]
+where N is a collision counter (incremented if the name already exists).
+All snapshots are read-only and immutable.
+.SH ARGUMENTS
+.TP
+.B SRC
+Source btrfs subvolume to snapshot.
+.TP
+.B SNAP_DIR
+Directory (on the same filesystem as SRC) where the snapshot will be stored.
+Created automatically if missing (with confirmation, unless
+.B --yes
+is set).
+.TP
+.B BASENAME
+Base name for the snapshot (e.g.,
+.BR home,
+.BR data).
+.SH OPTIONS
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations (e.g., creating missing directories).
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+On success, prints the path to the created snapshot:
+.EX
+created snapshot: /path/to/snapshot
+.EE
+.SH EXIT CODES
+.TP
+.B 0
+Snapshot created successfully.
+.TP
+.B 1
+Snapshot creation failed (e.g., directory creation error).
+.TP
+.B 2
+Usage error.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+Create a snapshot:
+.EX
+sudo mybtrfs snapshot /mnt/data /mnt/snapshots data
+.EE
+.TP
+Non-interactive (for cron):
+.EX
+sudo mybtrfs snapshot /mnt/data /mnt/snapshots data --yes --quiet
+.EE
+.SH NOTES
+.TP
+\(bu
+Snapshots are read-only and cannot be modified directly.
+.TP
+\(bu
+Snapshots do not consume significant space until the source is modified
+(btrfs uses copy-on-write).
+.TP
+\(bu
+Multiple snapshots can be created of the same source without conflicts.
+.TP
+\(bu
+The snapshot and source must be on the same btrfs filesystem.
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR btrfs-subvolume (8)

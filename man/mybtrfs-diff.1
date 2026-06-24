@@ -1,0 +1,104 @@
+.TH MYBTRFS-DIFF 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-diff \- estimate changed bytes between two snapshots
+.SH SYNOPSIS
+.B mybtrfs diff
+[\fIOPTIONS\fR]
+\fIOLDER_SNAP NEWER_SNAP\fR
+.SH DESCRIPTION
+.B mybtrfs diff
+estimates how many bytes have changed between two snapshots.
+Useful for predicting incremental backup size before running
+.BR mybtrfs-run (1).
+.PP
+Uses
+.BR "btrfs subvolume find-new" (8)
+to scan the file metadata and identify changed blocks.
+.SH ARGUMENTS
+.TP
+.B OLDER_SNAP
+Path to an older snapshot (read-only subvolume).
+.TP
+.B NEWER_SNAP
+Path to a newer snapshot (read-only subvolume).
+.SH OPTIONS
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated format:
+.EX
+older_path	older_size	newer_path	newer_size	changed_size
+/snap/data.20260623T1803	1.2 GB	/snap/data.20260624T1803	1.5 GB	300 MB
+.EE
+.PP
+Fields:
+.TP
+.B older_path
+Path to the older snapshot.
+.TP
+.B older_size
+Total size of the older snapshot.
+.TP
+.B newer_path
+Path to the newer snapshot.
+.TP
+.B newer_size
+Total size of the newer snapshot.
+.TP
+.B changed_size
+Estimated bytes changed (what
+.B mybtrfs send -p
+would transfer).
+.SH EXIT CODES
+.TP
+.B 0
+Diff estimated successfully.
+.TP
+.B 1
+Diff failed (e.g., invalid snapshot path).
+.TP
+.B 2
+Usage error.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+Estimate incremental backup size:
+.EX
+sudo mybtrfs diff /mnt/snapshots/data.20260623T1803 \\
+  /mnt/snapshots/data.20260624T1803
+.EE
+.TP
+Check if incremental would be significantly smaller than full:
+.EX
+NEW=/mnt/snapshots/data.20260624T1803
+CHANGED=$(sudo mybtrfs diff /mnt/snapshots/data.20260623T1803 "$NEW" | \\
+  awk -F\\\\t '{print $5}' | sed 's/ [A-Z]*$//')
+echo "Changed bytes: $CHANGED"
+.EE
+.SH NOTES
+.TP
+\(bu
+Both snapshots must be on the same btrfs filesystem.
+.TP
+\(bu
+The older snapshot's generation is used as the cutoff for
+.B find-new.
+.TP
+\(bu
+The estimate is accurate for btrfs copy-on-write semantics; actual sent bytes
+may differ slightly (headers, metadata).
+.TP
+\(bu
+If the snapshots are not related by parent/child, the estimate is the full
+size of the newer snapshot.
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR btrfs-subvolume (8),
+.BR btrfs-send (8)

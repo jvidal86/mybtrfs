@@ -1,0 +1,171 @@
+.TH MYBTRFS-PRUNE 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-prune \- delete old snapshots and backups per retention policy
+.SH SYNOPSIS
+.B mybtrfs prune
+[\fIOPTIONS\fR]
+\fISNAP_DIR TARGET\fR
+.SH DESCRIPTION
+.B mybtrfs prune
+deletes old snapshots and backups based on the specified (or default) retention policy.
+This is typically called automatically by
+.BR mybtrfs-run (1),
+but can be run independently to clean up without creating new snapshots or transfers.
+.PP
+Uses Grandfather-Father-Son (GFS) scheduling to decide which snapshots/backups to keep.
+By default, keeps everything (
+.B preserve-min all
+). Use
+.B --snapshot-preserve-daily
+and similar flags to enforce retention windows.
+.SH ARGUMENTS
+.TP
+.B SNAP_DIR
+Directory containing source snapshots.
+.TP
+.B TARGET
+Backup target: local directory path or remote
+.B ssh://[user@]host[:port]/path.
+.SH OPTIONS
+.TP
+.B \-\-dry-run
+Show what would be deleted without actually deleting anything.
+Useful for testing a retention policy before applying it.
+.TP
+.BR \-\-snapshot\-preserve\-min " \{all|latest|none\}"
+Minimum snapshots to preserve (default:
+.BR all).
+.TP
+.BR \-\-snapshot\-preserve " \fISPEC\fR"
+Retention tiers for source snapshots (e.g.,
+.B "24h 7d 4w 12m"
+). See
+.BR mybtrfs-run (1)
+for format details.
+.TP
+.BR \-\-snapshot\-preserve\-hourly " \fIN\fR"
+Keep N hourly snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-daily " \fIN\fR"
+Keep N daily snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-weekly " \fIN\fR"
+Keep N weekly snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-monthly " \fIN\fR"
+Keep N monthly snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-yearly " \fIN\fR"
+Keep N yearly snapshots.
+.TP
+.BR \-\-target\-preserve\-min " \{all|latest|none\}"
+Minimum backups to preserve (default:
+.BR all).
+.TP
+.BR \-\-target\-preserve " \fISPEC\fR"
+Retention tiers for backups.
+.TP
+.BR \-\-target\-preserve\-hourly " \fIN\fR"
+Keep N hourly backups.
+.TP
+.BR \-\-target\-preserve\-daily " \fIN\fR"
+Keep N daily backups.
+.TP
+.BR \-\-target\-preserve\-weekly " \fIN\fR"
+Keep N weekly backups.
+.TP
+.BR \-\-target\-preserve\-monthly " \fIN\fR"
+Keep N monthly backups.
+.TP
+.BR \-\-target\-preserve\-yearly " \fIN\fR"
+Keep N yearly backups.
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations.
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Log invocation to an audit file.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Use a custom run lock file.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated format:
+.EX
+pruned	N	M
+.EE
+where N is snapshots deleted and M is backups deleted.
+.PP
+With
+.B --dry-run,
+prefixes each item with
+.B would delete:
+instead of performing deletions.
+.SH EXIT CODES
+.TP
+.B 0
+Pruning completed successfully.
+.TP
+.B 1
+Prune failed (e.g., deletion error).
+.TP
+.B 2
+Usage error.
+.TP
+.B 3
+Run lock held.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+Dry-run: preview what would be deleted:
+.EX
+sudo mybtrfs prune --dry-run /mnt/snapshots /mnt/backup \\
+  --snapshot-preserve-daily 7 --target-preserve-daily 30
+.EE
+.TP
+Enforce retention policy (keep 7 days of daily snapshots):
+.EX
+sudo mybtrfs prune /mnt/snapshots /mnt/backup \\
+  --snapshot-preserve-daily 7 --target-preserve-daily 30
+.EE
+.TP
+Keep only the latest snapshot (aggressive cleanup):
+.EX
+sudo mybtrfs prune /mnt/snapshots /mnt/backup \\
+  --snapshot-preserve-min latest --target-preserve-min latest
+.EE
+.TP
+Delete everything except the latest (nuclear option):
+.EX
+sudo mybtrfs prune /mnt/snapshots /mnt/backup \\
+  --snapshot-preserve-min none --target-preserve-min none
+.EE
+.SH SAFETY
+Prune is conservative: it will not delete if:
+.TP
+\(bu
+The just-created snapshot/backup is in the schedule (always preserved).
+.TP
+\(bu
+A backup needs a snapshot as a parent for future incrementals
+(the latest common pair is preserved).
+.TP
+\(bu
+Any target became unreachable during the preceding
+.BR mybtrfs-run (1)
+(all snapshot deletion is skipped).
+.PP
+Use
+.B --dry-run
+to verify the policy before applying.
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-run (1),
+.BR mybtrfs-status (1)

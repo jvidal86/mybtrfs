@@ -1,0 +1,75 @@
+.TH MYBTRFS-STATS 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-stats \- show aggregate backup statistics (snapshot/backup counts, sizes, space savings)
+.SH SYNOPSIS
+.B mybtrfs stats
+[\fIOPTIONS\fR]
+\fISNAP_DIR TARGET\fR
+.SH DESCRIPTION
+.B mybtrfs stats
+displays aggregate statistics about snapshots and backups:
+.TP
+\(bu
+Total count of snapshots and backups
+.TP
+\(bu
+Total size of snapshots and backups
+.TP
+\(bu
+Disk usage on source and target filesystems
+.TP
+\(bu
+Space savings from deduplication / copy-on-write
+.PP
+Useful for capacity planning and monitoring backup growth.
+.SH ARGUMENTS
+.TP
+.B SNAP_DIR
+Directory containing source snapshots.
+.TP
+.B TARGET
+Backup target: local directory path or remote
+.B ssh://[user@]host[:port]/path.
+.SH OPTIONS
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and headers.
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH OUTPUT
+Tab-separated format:
+.EX
+snapshots	5	2.3 GB
+backups	5	1.8 GB
+total_size	4.1 GB
+savings	450 MB
+.EE
+.SH EXIT CODES
+.TP
+.B 0
+Stats retrieved successfully.
+.TP
+.B 1
+Stats failed (e.g., directory not found).
+.TP
+.B 2
+Usage error.
+.TP
+.B 4
+Permission denied (requires root).
+.SH EXAMPLES
+.TP
+Show backup statistics:
+.EX
+sudo mybtrfs stats /mnt/snapshots /mnt/backup
+.EE
+.TP
+Monitor growth over time:
+.EX
+date; sudo mybtrfs stats /mnt/snapshots /mnt/backup
+.EE
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-list (1),
+.BR mybtrfs-status (1)

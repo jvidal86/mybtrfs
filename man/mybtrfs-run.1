@@ -1,0 +1,299 @@
+.TH MYBTRFS-RUN 1 "June 2026" "mybtrfs 0.2.0" "User Commands"
+.SH NAME
+mybtrfs-run \- full backup: snapshot, send/receive, and prune in one command
+.SH SYNOPSIS
+.B mybtrfs run
+[\fIOPTIONS\fR]
+[\fI--set BACKUP_SET_FILE\fR | \fISRC SNAP_DIR BASENAME [TARGET]\fR]
+.SH DESCRIPTION
+.B mybtrfs run
+performs a complete backup workflow:
+.TP
+1. Create a read-only snapshot of the source subvolume
+.TP
+2. Send the snapshot incrementally (if applicable) to a target filesystem
+.TP
+3. Verify the received copy (read-only, correct UUID)
+.TP
+4. Prune old snapshots and backups per retention policy
+.PP
+This is the primary workflow. For multi-subvolume backups, use
+.B --set
+to specify a TOML backup-set file with multiple
+.B [[backup]]
+entries (see BACKUP-SET FILE below).
+.SH ARGUMENTS
+.TP
+.B SRC
+Source btrfs subvolume to back up. Can be any mounted subvolume path.
+.TP
+.B SNAP_DIR
+Directory (on the same filesystem as SRC) where snapshots will be stored.
+Created automatically if missing (with confirmation, unless
+.B --yes
+is set).
+.TP
+.B BASENAME
+Base name for generated snapshots/backups (e.g.,
+.BR home,
+.BR data).
+Snapshots and backups are named as:
+.B <BASENAME>.<TIMESTAMP>[_N]
+where N is a collision counter (incremented if the name already exists).
+.TP
+.B TARGET
+(Optional) Backup destination: either a local directory path or a remote
+.B ssh://[user@]host[:port]/path
+endpoint.
+.B
+If omitted, you are prompted to pick from discovered btrfs drives.
+.SH OPTIONS
+.TP
+.BR \-\-set " \fIPATH\fR"
+Read backup jobs from a TOML file instead of using positional arguments.
+See BACKUP-SET FILE below. When provided, SRC, SNAP_DIR, and BASENAME are optional.
+.TP
+.B \-\-incremental {yes|no|strict}
+Control
+.BR "btrfs send" (8)
+.B -p
+behavior (default:
+.BR yes).
+.RS
+.TP
+.B yes
+Use
+.B -p
+(incremental) if a parent is available, otherwise full backup.
+.TP
+.B no
+Never use
+.B -p;
+always send the full subvolume.
+.TP
+.B strict
+Require a valid parent; fail if none exists.
+.RE
+.TP
+.BR \-\-snapshot\-preserve\-min " \{all|latest|none\}"
+Minimum snapshots to preserve regardless of age (default:
+.BR all,
+keep everything). Other values:
+.B latest
+(keep only the newest),
+.B none
+(let retention policy decide).
+.TP
+.BR \-\-snapshot\-preserve " \fISPEC\fR"
+Retention tiers for source snapshots using GFS notation (default: keep all).
+Example:
+.B "24h 7d 4w 12m"
+(keep hourly for 24 hours, daily for 7 days, weekly for 4 weeks, monthly for 12 months).
+See RETENTION POLICIES below.
+.TP
+.BR \-\-snapshot\-preserve\-hourly " \fIN\fR"
+Keep N hourly snapshots (overrides schedule).
+.TP
+.BR \-\-snapshot\-preserve\-daily " \fIN\fR"
+Keep N daily snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-weekly " \fIN\fR"
+Keep N weekly snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-monthly " \fIN\fR"
+Keep N monthly snapshots.
+.TP
+.BR \-\-snapshot\-preserve\-yearly " \fIN\fR"
+Keep N yearly snapshots.
+.TP
+.BR \-\-target\-preserve\-min " \{all|latest|none\}"
+Minimum backups to preserve (default:
+.BR all).
+.TP
+.BR \-\-target\-preserve " \fISPEC\fR"
+Retention tiers for backups (default: keep all).
+.TP
+.BR \-\-target\-preserve\-hourly " \fIN\fR"
+Keep N hourly backups.
+.TP
+.BR \-\-target\-preserve\-daily " \fIN\fR"
+Keep N daily backups.
+.TP
+.BR \-\-target\-preserve\-weekly " \fIN\fR"
+Keep N weekly backups.
+.TP
+.BR \-\-target\-preserve\-monthly " \fIN\fR"
+Keep N monthly backups.
+.TP
+.BR \-\-target\-preserve\-yearly " \fIN\fR"
+Keep N yearly backups.
+.TP
+.B \-\-yes
+Assume "yes" to all confirmations (e.g., creating missing directories).
+.TP
+.B \-q, \-\-quiet
+Suppress progress indicators and summary output.
+.TP
+.BR \-\-journal " \fIPATH\fR"
+Log this invocation to an audit file.
+.TP
+.BR \-\-lock " \fIPATH\fR"
+Use a custom run lock file (default: \fI<tmpdir>/mybtrfs-<uid>.lock\fR).
+.TP
+.BR \-\-log-file " \fIPATH\fR"
+Write diagnostic logs to a file.
+.SH BACKUP-SET FILE
+The
+.B --set
+option reads a TOML file containing multiple backup jobs. This enables
+multi-subvolume backups without scripting.
+.PP
+Format: each
+.B [[backup]]
+section defines one job.
+.EX
+[[backup]]
+source = "/mnt/data"
+snapshot_dir = "/mnt/snapshots"
+basename = "data"
+target_dir = "/mnt/backup"
+incremental = "yes"
+snapshot_preserve_daily = 7
+
+[[backup]]
+source = "/mnt/home"
+snapshot_dir = "/mnt/snapshots"
+basename = "home"
+target_dir = "ssh://backup.example.com/data/home"
+snapshot_preserve_daily = 30
+target_preserve_daily = 365
+.EE
+.PP
+All fields match the command-line arguments.
+Optional retention fields override command-line defaults for that entry.
+.SH RETENTION POLICIES
+Retention uses Grandfather-Father-Son (GFS) scheduling.
+Specify tiers as:
+.B "24h 7d 4w 12m"
+(keep one per hour for 24 hours, one per day for 7 days, etc.).
+.PP
+Supported time units:
+.B h
+(hours),
+.B d
+(days),
+.B w
+(weeks),
+.B m
+(months),
+.B y
+(years).
+.PP
+.B preserve-min
+shortcuts:
+.TP
+.B all
+Keep every snapshot/backup (default). Overrides all tiers.
+.TP
+.B latest
+Keep only the newest. Overrides all tiers.
+.TP
+.B none
+Use only the scheduled tiers (no minimum).
+.SH OUTPUT
+On success, tab-separated output (scriptable, no emojis):
+.EX
+snapshot	/path/to/snapshot
+backup	/path/to/backup
+pruned	N	M
+.EE
+where N is snapshots deleted and M is backups deleted.
+.PP
+With
+.B --quiet,
+only errors are printed.
+.SH EXIT CODES
+.TP
+.B 0
+Backup completed successfully.
+.TP
+.B 1
+Backup failed (e.g., transfer error, send/receive failure).
+.TP
+.B 2
+Usage error (bad arguments).
+.TP
+.B 3
+Run lock held by another invocation.
+.TP
+.B 4
+Permission denied (requires root). Re-run with
+.BR sudo (8).
+.SH EXAMPLES
+.TP
+Full backup with interactive target selection:
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data
+.EE
+.TP
+Incremental backup to an explicit target:
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup
+.EE
+.TP
+With retention policy (keep 7 days of daily snapshots):
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
+  --snapshot-preserve-daily 7 --target-preserve-daily 30
+.EE
+.TP
+Strict incremental (fail if no parent found):
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
+  --incremental strict
+.EE
+.TP
+Remote backup via SSH:
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data \\
+  ssh://user@backup.example.com:2222/backups/myhost
+.EE
+.TP
+From a backup-set file (multi-subvolume):
+.EX
+sudo mybtrfs run --set /etc/mybtrfs.backup-set.toml
+.EE
+.TP
+Non-interactive for cron (with logging):
+.EX
+sudo mybtrfs run /mnt/data /mnt/snapshots data /mnt/backup \\
+  --yes --quiet --journal /var/log/mybtrfs.journal
+.EE
+.SH NOTES
+.TP
+\(bu
+Snapshots are read-only and immutable; they can safely coexist with active data.
+.TP
+\(bu
+Incremental backups require a valid parent relationship (matching parent_uuid).
+If the parent is missing or corrupted, the incremental fails; use
+.B --incremental no
+for a full backup fallback.
+.TP
+\(bu
+The tool verifies every transfer: if the received copy is missing a
+.B received_uuid
+or has the wrong
+.B parent_uuid,
+it is deleted and an error is raised.
+.TP
+\(bu
+All timestamps are in the system's local timezone.
+.SH SEE ALSO
+.BR mybtrfs (1),
+.BR mybtrfs-prune (1),
+.BR mybtrfs-restore (1),
+.BR mybtrfs-status (1),
+.BR btrfs-send (8),
+.BR btrfs-receive (8),
+.BR ssh (1)
