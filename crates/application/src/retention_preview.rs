@@ -8,7 +8,139 @@ use mybtrfs_domain::model::Subvolume;
 use mybtrfs_domain::naming::parse_name;
 use mybtrfs_domain::retention::Schedule;
 
+// ============================================================================
+// Implementation
+// ============================================================================
+
+/// Format a retention `Schedule<T>` as a human-readable preview string.
+/// Separates PRESERVE and DELETE partitions, includes counts and ages.
+///
+/// # Arguments
+/// * `schedule` — the computed schedule (preserve/delete partitions)
+///
+/// # Returns
+/// A formatted string suitable for terminal display.
+#[must_use]
+pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
+    let now = Local::now();
+    let mut output = String::new();
+
+    use std::ffi::OsStr;
+
+    // PRESERVE section
+    if !schedule.preserve.is_empty() {
+        output.push_str("PRESERVE (");
+        output.push_str(&schedule.preserve.len().to_string());
+        output.push_str(" snapshot");
+        if schedule.preserve.len() != 1 {
+            output.push('s');
+        }
+        output.push_str("):\n");
+        for sv in &schedule.preserve {
+            let name = sv
+                .path
+                .file_name()
+                .and_then(|n: &OsStr| n.to_str())
+                .unwrap_or("?");
+            let age = compute_age(name, &now);
+            output.push_str("  ✅ ");
+            output.push_str(name);
+            output.push_str(" (");
+            output.push_str(&age);
+            output.push_str(")\n");
+        }
+        output.push('\n');
+    }
+
+    // DELETE section
+    if !schedule.delete.is_empty() {
+        output.push_str("DELETE (");
+        output.push_str(&schedule.delete.len().to_string());
+        output.push_str(" snapshot");
+        if schedule.delete.len() != 1 {
+            output.push('s');
+        }
+        output.push_str(") — run with --yes to confirm:\n");
+        for sv in &schedule.delete {
+            let name = sv
+                .path
+                .file_name()
+                .and_then(|n: &OsStr| n.to_str())
+                .unwrap_or("?");
+            let age = compute_age(name, &now);
+            output.push_str("  ⚠️  ");
+            output.push_str(name);
+            output.push_str(" (");
+            output.push_str(&age);
+            output.push_str(")\n");
+        }
+    } else if schedule.preserve.is_empty() {
+        output.push_str("No snapshots to manage.\n");
+    } else {
+        output.push_str("No snapshots to delete.\n");
+    }
+
+    output
+}
+
+/// Parse a snapshot name (ISO timestamp) and compute age relative to "now".
+///
+/// Parses the ISO timestamp from the snapshot basename (e.g., "data.20260624T143210")
+/// and computes a human-readable age like "7 days ago" or "2 hours ago".
+///
+/// # Arguments
+/// * `name` — snapshot basename (e.g., "data.20260624T143210")
+/// * `now` — current time (injected, chrono::DateTime<Local>)
+///
+/// # Returns
+/// A human-readable age string (e.g., "7 days ago", "2 hours ago").
+/// If the name doesn't parse, returns a placeholder like "unknown age".
+#[must_use]
+pub fn compute_age(name: &str, now: &chrono::DateTime<Local>) -> String {
+    // Try to parse the name and extract its timestamp.
+    if let Some(parsed) = parse_name(name) {
+        // parsed.naive is a NaiveDateTime representing when the snapshot was created.
+        // Treat it as local time in the same timezone as "now".
+        let snap_local = parsed.naive.and_local_timezone(now.timezone()).single();
+
+        if let Some(snap_dt) = snap_local {
+            let duration = now.signed_duration_since(snap_dt);
+            let secs = duration.num_seconds() as u64;
+
+            if secs < 60 {
+                "just now".to_string()
+            } else if secs < 3600 {
+                let mins = secs / 60;
+                if mins == 1 {
+                    "1 minute ago".to_string()
+                } else {
+                    format!("{} minutes ago", mins)
+                }
+            } else if secs < 86400 {
+                let hours = secs / 3600;
+                if hours == 1 {
+                    "1 hour ago".to_string()
+                } else {
+                    format!("{} hours ago", hours)
+                }
+            } else {
+                let days = secs / 86400;
+                if days == 1 {
+                    "1 day ago".to_string()
+                } else {
+                    format!("{} days ago", days)
+                }
+            }
+        } else {
+            "unknown age".to_string()
+        }
+    } else {
+        "unknown age".to_string()
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -233,136 +365,5 @@ mod tests {
 
         // Assert
         assert_eq!(output1, output2, "format output must be deterministic");
-    }
-}
-
-// ============================================================================
-// Implementation
-// ============================================================================
-
-/// Format a retention `Schedule<T>` as a human-readable preview string.
-/// Separates PRESERVE and DELETE partitions, includes counts and ages.
-///
-/// # Arguments
-/// * `schedule` — the computed schedule (preserve/delete partitions)
-///
-/// # Returns
-/// A formatted string suitable for terminal display.
-#[must_use]
-pub fn format_schedule(schedule: &Schedule<Subvolume>) -> String {
-    let now = Local::now();
-    let mut output = String::new();
-
-    use std::ffi::OsStr;
-
-    // PRESERVE section
-    if !schedule.preserve.is_empty() {
-        output.push_str("PRESERVE (");
-        output.push_str(&schedule.preserve.len().to_string());
-        output.push_str(" snapshot");
-        if schedule.preserve.len() != 1 {
-            output.push('s');
-        }
-        output.push_str("):\n");
-        for sv in &schedule.preserve {
-            let name = sv
-                .path
-                .file_name()
-                .and_then(|n: &OsStr| n.to_str())
-                .unwrap_or("?");
-            let age = compute_age(name, &now);
-            output.push_str("  ✅ ");
-            output.push_str(name);
-            output.push_str(" (");
-            output.push_str(&age);
-            output.push_str(")\n");
-        }
-        output.push('\n');
-    }
-
-    // DELETE section
-    if !schedule.delete.is_empty() {
-        output.push_str("DELETE (");
-        output.push_str(&schedule.delete.len().to_string());
-        output.push_str(" snapshot");
-        if schedule.delete.len() != 1 {
-            output.push('s');
-        }
-        output.push_str(") — run with --yes to confirm:\n");
-        for sv in &schedule.delete {
-            let name = sv
-                .path
-                .file_name()
-                .and_then(|n: &OsStr| n.to_str())
-                .unwrap_or("?");
-            let age = compute_age(name, &now);
-            output.push_str("  ⚠️  ");
-            output.push_str(name);
-            output.push_str(" (");
-            output.push_str(&age);
-            output.push_str(")\n");
-        }
-    } else if schedule.preserve.is_empty() {
-        output.push_str("No snapshots to manage.\n");
-    } else {
-        output.push_str("No snapshots to delete.\n");
-    }
-
-    output
-}
-
-/// Parse a snapshot name (ISO timestamp) and compute age relative to "now".
-///
-/// Parses the ISO timestamp from the snapshot basename (e.g., "data.20260624T143210")
-/// and computes a human-readable age like "7 days ago" or "2 hours ago".
-///
-/// # Arguments
-/// * `name` — snapshot basename (e.g., "data.20260624T143210")
-/// * `now` — current time (injected, chrono::DateTime<Local>)
-///
-/// # Returns
-/// A human-readable age string (e.g., "7 days ago", "2 hours ago").
-/// If the name doesn't parse, returns a placeholder like "unknown age".
-#[must_use]
-pub fn compute_age(name: &str, now: &chrono::DateTime<Local>) -> String {
-    // Try to parse the name and extract its timestamp.
-    if let Some(parsed) = parse_name(name) {
-        // parsed.naive is a NaiveDateTime representing when the snapshot was created.
-        // Treat it as local time in the same timezone as "now".
-        let snap_local = parsed.naive.and_local_timezone(now.timezone()).single();
-
-        if let Some(snap_dt) = snap_local {
-            let duration = now.signed_duration_since(snap_dt);
-            let secs = duration.num_seconds() as u64;
-
-            if secs < 60 {
-                "just now".to_string()
-            } else if secs < 3600 {
-                let mins = secs / 60;
-                if mins == 1 {
-                    "1 minute ago".to_string()
-                } else {
-                    format!("{} minutes ago", mins)
-                }
-            } else if secs < 86400 {
-                let hours = secs / 3600;
-                if hours == 1 {
-                    "1 hour ago".to_string()
-                } else {
-                    format!("{} hours ago", hours)
-                }
-            } else {
-                let days = secs / 86400;
-                if days == 1 {
-                    "1 day ago".to_string()
-                } else {
-                    format!("{} days ago", days)
-                }
-            }
-        } else {
-            "unknown age".to_string()
-        }
-    } else {
-        "unknown age".to_string()
     }
 }

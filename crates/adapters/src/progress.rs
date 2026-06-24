@@ -76,13 +76,13 @@ impl ProgressPort for IndicatifProgress {
     }
 
     fn finish(&self, msg: &str) {
-        if let Ok(mut guard) = self.bar.lock() {
-            if let Some(bar) = guard.take() {
-                if msg.is_empty() {
-                    bar.finish_and_clear();
-                } else {
-                    bar.finish_with_message(msg.to_owned());
-                }
+        if let Ok(mut guard) = self.bar.lock()
+            && let Some(bar) = guard.take()
+        {
+            if msg.is_empty() {
+                bar.finish_and_clear();
+            } else {
+                bar.finish_with_message(msg.to_owned());
             }
         }
     }
@@ -101,9 +101,9 @@ fn replace_bar(slot: &Mutex<Option<ProgressBar>>, new_bar: ProgressBar) {
 
 /// Call `f` on the active indicator if one exists; no-op otherwise.
 fn with_bar(slot: &Mutex<Option<ProgressBar>>, f: impl FnOnce(&ProgressBar)) {
-    if let Ok(guard) = slot.lock() {
-        if let Some(bar) = guard.as_ref() {
-            f(bar);
-        }
+    if let Ok(guard) = slot.lock()
+        && let Some(bar) = guard.as_ref()
+    {
+        f(bar);
     }
 }

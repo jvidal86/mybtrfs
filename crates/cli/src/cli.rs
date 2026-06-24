@@ -58,6 +58,9 @@ fn default_log_path() -> Option<PathBuf> {
 /// Initialize dual-target logging: errors/warnings to stderr (with color),
 /// info/debug to log file. This ensures critical messages are always visible,
 /// even with `--quiet`, matching standard backup-tool behavior (btrbk, rsync, borg).
+// SAFETY: `expect` on `set_boxed_logger` is sound — `run()` is the sole caller and
+// initializes the logger exactly once, so "already initialized" is unreachable.
+#[allow(clippy::expect_used)]
 fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
     use std::fs::OpenOptions;
 
@@ -91,10 +94,10 @@ fn setup_dual_target_logger(quiet: &bool, log_file: Option<&Path>) {
 
     // File target: all messages (info/debug/warn/error), unless --quiet
     if let Some(log_path) = log_file {
-        if let Some(parent) = log_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = log_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(file) = OpenOptions::new().create(true).append(true).open(log_path) {
             let mut file_builder = env_logger::Builder::new();
@@ -478,7 +481,7 @@ pub fn run() -> ExitCode {
     // Dual-target logging: errors/warnings always go to stderr (even with --quiet),
     // while info/debug go to the log file. This matches standard backup-tool
     // behavior (btrbk, rsync, borg): critical info is always visible.
-    let log_path = cli.log_file.clone().or_else(|| default_log_path());
+    let log_path = cli.log_file.clone().or_else(default_log_path);
     setup_dual_target_logger(&cli.quiet, log_path.as_deref());
     match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
@@ -761,7 +764,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             // For Phase 3, we estimate based on snapshot naming (simplified).
             // In production, this would use btrfs subvolume find-new with actual cgen.
             let older_cgen = 100u64; // Placeholder: extract from actual snapshot metadata
-            let diff = DiffService::estimate_changes(&older_snapshot, older_cgen, &newer_snapshot);
+            let diff = DiffService::estimate_changes(older_snapshot, older_cgen, newer_snapshot);
             print_diff(&diff);
             Ok(())
         }

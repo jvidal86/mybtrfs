@@ -6,7 +6,6 @@
 #[cfg(test)]
 mod retention_preview_e2e {
     use std::path::PathBuf;
-    use std::process::Command;
 
     /// Helper: construct a loopback btrfs fixture (source and snapshot dir).
     /// Returns (fixture_path, cleanup_fn).
@@ -19,7 +18,7 @@ mod retention_preview_e2e {
     }
 
     /// Helper: run `mybtrfs prune --dry-run` and parse the output.
-    fn run_dry_run(snapshot_dir: &PathBuf) -> PreviewOutput {
+    fn run_dry_run(_snapshot_dir: &PathBuf) -> PreviewOutput {
         // TODO: spawn mybtrfs prune --dry-run command
         // TODO: parse stdout into structured PreviewOutput
         // TODO: return result or error
@@ -27,7 +26,7 @@ mod retention_preview_e2e {
     }
 
     /// Helper: run `mybtrfs prune --yes` and return the deleted paths.
-    fn run_actual_prune(snapshot_dir: &PathBuf) -> Vec<String> {
+    fn run_actual_prune(_snapshot_dir: &PathBuf) -> Vec<String> {
         // TODO: list snapshots before prune
         // TODO: run mybtrfs prune --yes
         // TODO: list snapshots after prune
@@ -69,12 +68,12 @@ mod retention_preview_e2e {
         // TODO: tag each snapshot with its day (via name or separate tracking)
 
         // Act: dry-run
-        let preview = run_dry_run(&fixture);
+        let _preview = run_dry_run(&fixture);
 
         // Act: actual prune on identical fixture
         let (fixture2, _cleanup2) = setup_loopback_fixture();
         // TODO: recreate the same 7 snapshots on fixture2
-        let actual_deleted = run_actual_prune(&fixture2);
+        let _actual_deleted = run_actual_prune(&fixture2);
 
         // Assert
         // TODO: assert preview.delete set equals actual_deleted set (by name)
@@ -92,7 +91,7 @@ mod retention_preview_e2e {
         // TODO: create 5 snapshots (2 to delete, 3 to preserve)
 
         // Act
-        let preview = run_dry_run(&fixture);
+        let _preview = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert preview.preserve.len() == 3
@@ -111,7 +110,7 @@ mod retention_preview_e2e {
         // TODO: create named snapshots, e.g. "data.20260610T120000", "data.20260617T120000"
 
         // Act
-        let output = run_dry_run(&fixture);
+        let _output = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert output.delete contains "data.20260610T120000"
@@ -129,7 +128,7 @@ mod retention_preview_e2e {
         // (no snapshots created)
 
         // Act
-        let preview = run_dry_run(&fixture);
+        let _preview = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert preview.delete.len() == 0
@@ -147,7 +146,7 @@ mod retention_preview_e2e {
         // TODO: create 3 snapshots (all within GFS daily window)
 
         // Act
-        let preview = run_dry_run(&fixture);
+        let _preview = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert preview.delete.len() == 0
@@ -166,7 +165,7 @@ mod retention_preview_e2e {
         // TODO: create snapshots from specific days (e.g., 1 week ago, 8 days ago)
 
         // Act
-        let output = run_dry_run(&fixture);
+        let _output = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert output contains "days ago" or similar age descriptor
@@ -184,7 +183,7 @@ mod retention_preview_e2e {
         // TODO: create several snapshots
 
         // Act
-        let output = run_dry_run(&fixture);
+        let _output = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert output does NOT contain "Schedule {" or "preserve: [" (debug format)
@@ -241,7 +240,7 @@ mod retention_preview_e2e {
         // TODO: create 2 snapshots to delete, 3 to preserve
 
         // Act
-        let output = run_dry_run(&fixture);
+        let _output = run_dry_run(&fixture);
 
         // Assert
         // TODO: assert output contains "run with --yes" or "confirm" or similar

@@ -58,6 +58,7 @@ impl<'a> StatusService<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod service_tests {
     use super::*;
     use crate::ports::PortError;
@@ -133,6 +134,7 @@ mod service_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use mybtrfs_domain::model::Uuid;
@@ -196,12 +198,12 @@ mod tests {
     #[test]
     fn status_identifies_latest_snapshot_and_backup() {
         // Arrange
-        let snapshots = vec![
+        let snapshots = [
             mock_subvolume("data.20260622T1432", 3, true, false),
             mock_subvolume("data.20260624T1432", 1, true, false), // latest
             mock_subvolume("data.20260623T1432", 2, true, false),
         ];
-        let backups = vec![
+        let backups = [
             mock_subvolume("data.20260623T1432", 11, true, true), // latest
             mock_subvolume("data.20260620T1432", 10, true, true),
         ];
@@ -263,11 +265,11 @@ mod tests {
     #[test]
     fn status_health_check_latest_backup_matches_snapshot() {
         // Arrange: matching latest
-        let snapshots = vec![
+        let snapshots = [
             mock_subvolume("data.20260624T1432", 1, true, false),
             mock_subvolume("data.20260623T1432", 2, true, false),
         ];
-        let backups = vec![
+        let backups = [
             mock_subvolume("data.20260624T1432", 10, true, true), // matches latest snapshot
             mock_subvolume("data.20260623T1432", 11, true, true),
         ];
@@ -281,7 +283,7 @@ mod tests {
             })
             .and_then(|sv| sv.path.file_name())
             .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let latest_backup_name = backups
             .iter()
@@ -291,7 +293,7 @@ mod tests {
             })
             .and_then(|sv| sv.path.file_name())
             .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         // Assert: latest backup name equals latest snapshot name
         assert_eq!(latest_snap_name, latest_backup_name);
@@ -304,11 +306,11 @@ mod tests {
     #[test]
     fn status_health_check_latest_backup_lags_snapshot() {
         // Arrange: backup lags
-        let snapshots = vec![
+        let snapshots = [
             mock_subvolume("data.20260624T1432", 1, true, false), // latest snapshot
             mock_subvolume("data.20260623T1432", 2, true, false),
         ];
-        let backups = vec![
+        let backups = [
             mock_subvolume("data.20260623T1432", 11, true, true), // lag: no 20260624 backup yet
             mock_subvolume("data.20260622T1432", 10, true, true),
         ];
@@ -322,7 +324,7 @@ mod tests {
             })
             .and_then(|sv| sv.path.file_name())
             .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let latest_backup_name = backups
             .iter()
@@ -332,7 +334,7 @@ mod tests {
             })
             .and_then(|sv| sv.path.file_name())
             .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         // Assert: latest backup name differs from latest snapshot name
         assert_ne!(latest_snap_name, latest_backup_name);
