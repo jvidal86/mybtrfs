@@ -6,28 +6,32 @@
 
 ---
 
-## §1 — Scope & sequencing
+## §1 — Scope & sequencing (post-design-review)
 
-This plan selects the three highest-leverage v1.x features from `09-roadmap.md` §6, ranked by
-impact and integration simplicity:
+This plan targets three features from `09-roadmap.md` §6, but **revised after design review** 
+to reflect real implementation costs:
 
-1. **Status view** (backed by journal) — the headline wedge; btrbk is weakest here
-2. **Snapshot diff** — cheap, differentiating, unit-testable
-3. **Retention preview** — ~90% done via dry-run; needs presentation polish
+1. **Retention preview** — ~95% done; needs UI polish only. **READY for v1.1.**
+2. **Status view** — metadata-derived (not journal-backed); counts + ages only. **READY for v1.1.**
+3. **Snapshot diff** — cost higher than initially scoped (requires `find-new` method on `SubvolumeRepository`).
+   **OPTIONAL: ship estimate-only (v1.1) or defer to v1.2.**
 
-**Deliberately deferred to v2:** native encryption, restorability check, TUI, backup-set file
-(each needs design-first work or infra we lack).
+**Key changes from initial plan:**
+- Status is now **stateless** (re-derived from btrfs metadata) instead of journal-backed.
+- All byte-figure output is deferred; v1.1 reports **counts and timestamps only**.
+- Diff is downscoped from "per-file breakdown" to "incremental-size estimate" or deferred entirely.
 
-**Why this order:**
-- Status view lands first because it's the most-cited pain point (roadmap users + btrbk
-  switcher feedback).
-- Snapshot diff is self-contained and validates the "new query" pattern.
-- Retention preview is quick polish with no new ports or adapters.
-- Each is orthogonal; can ship independently.
+**Why this revised order:**
+- **Retention preview** ships first: cleanest, no new ports, validates the "UI polish" pattern.
+- **Status view** ships second: small new service, integrates existing repos + naming parser.
+- **Diff (optional):** if time/risk allows, add as estimate-only; otherwise defer to v1.2 (safe, unblocks release).
+
+**Deliberately deferred to v1.2+:** native encryption, file-by-file diff, space accounting, 
+restorability check, TUI, backup-set file (each needs significant design or infrastructure).
 
 ---
 
-## §2 — Architecture decisions (no domain changes)
+## §2 — Architecture decisions (read-only queries, but with real new ports)
 
 ### 2.1 — Dependency rule compliance
 
@@ -46,18 +50,21 @@ Dependency rule: cli → adapters → application → domain
 Each feature:
 - **Adds a new CLI command** (`status`, `diff`, `prune --preview`)
 - **Adds new application service(s)** (e.g., `StatusService`) with ports for reads
-- **Reuses existing ports** (`SubvolumeRepository`, `ClockPort`, `JournalPort`)
+- **Reuses existing ports where possible** (`SubvolumeRepository`, `ClockPort`)
+- **Adds ONE new method to SubvolumeRepository** (see below) for diff byte-sizing
 - **No new dangerous ports** (no delete, no transfer, no write)
 
-### 2.2 — Port reuse vs. new ports
+### 2.2 — Port additions (honest accounting)
 
-| Feature | Existing ports | New port? |
+The initial plan claimed "no new ports"; reviews found this was optimistic.
+
+| Feature | Existing ports | Real additions |
 |---------|---|---|
-| Status view | `SubvolumeRepository`, `ClockPort`, `JournalPort` | No — journal is the backing |
-| Snapshot diff | `SubvolumeRepository` | No — pure diff logic |
-| Retention preview | `SubvolumeRepository`, `RetentionPolicy` | No — re-use from `RetentionService` |
+| Status view | `SubvolumeRepository`, `ClockPort` | None — re-derive from btrfs metadata only (not journal-backed) |
+| Snapshot diff | `SubvolumeRepository` | New method: `find_new_estimate(&self, source: &Path, since_gen: u64) -> Result<u64, PortError>` (wraps `btrfs subvolume find-new`) |
+| Retention preview | `SubvolumeRepository`, `RetentionPolicy` | None — pure view over existing `Schedule<T>` |
 
-**Principle:** New queries go through existing ports; only dangerous ops get new ports.
+**Principle:** New queries go through existing ports; extend ports with new read-only query methods when needed (not breaking). No size field in `Subvolume` (too expensive to compute; estimated via find-new at query time).
 
 ### 2.3 — Service layer additions
 
@@ -100,7 +107,9 @@ impl PruneService<'_> {
 
 ### 3.1 — Status view
 
-**Goal:** Show last-run health without querying a side database (stateless, re-derived).
+**Goal:** Show backup health (latest snapshots/backups, age, counts) without a side database. Stateless: re-derive from btrfs metadata (timestamps in snapshot names, cgens, received_uuid).
+
+**Scope for v1.1:** Counts and timestamps only. **Defer** byte-level space accounting to v1.2 (requires a sizing port that doesn't exist yet).
 
 **Input:**
 - Source path (where snapshots live)
@@ -110,106 +119,109 @@ impl PruneService<'_> {
 **Output (human-readable + JSON for scripting):**
 ```
 Status Report
-─────────────────────────────────────────
+────────────────────────────────────────────
 Target: /backup/myhost
-  Last successful backup:  2026-06-24 14:32:10 (41 minutes ago)
-  Last run status:         ✅ success
-  Latest snapshot:         data.20260624T143210 (readonly, 1.2 GB)
-  Latest backup:           data.20260624T143210 (readonly, received, 1.2 GB)
-  Next scheduled run:      2026-06-24 15:00:00 (systemd timer)
+  Latest snapshot:         data.20260624T143210 (readonly, 7 minutes ago)
+  Latest backup:           data.20260624T143210 (readonly, received, 7 minutes ago)
   
-Space summary:
-  Source snapshots:        2.4 GB (3 snapshots) [policy: keep 7 daily]
-  Target backups:          4.8 GB (6 backups)   [policy: keep 4 daily, 4 weekly]
+Snapshot count:  3 snapshots  [retention policy: keep 7 daily]
+Backup count:    6 backups    [retention policy: keep 4 daily, 4 weekly]
   
 Health check:
-  ⚠️ Warning: 1 orphaned snapshot (delete failed on 2026-06-23)
-  ⚠️ Warning: Last backup is 41 minutes old (target unreachable for 6 hours yesterday)
+  ✅ Backup matches latest snapshot (incremental parent OK)
+  ✅ No orphaned snapshots (all have backups or are within policy)
+  ⚠️  Oldest backup is 8 days old (outside daily window, kept by weekly policy)
 ```
 
 **Architecture:**
-- `StatusService` reads snapshots + backups (via repos), journal (last N runs), current time.
-- Formats output via adapter (new `OutputFormatter` port? or just in CLI).
-- **Pure:** no I/O except reads; re-derives health from existing data.
+- `StatusService` reads snapshots + backups (via `SubvolumeRepository`), parses names (via `domain::naming`), computes recency + counts.
+- **Stateless:** derives all truth from btrfs metadata + name timestamps. No journal dependency (journal is audit trail, not health source).
+- Formats output via CLI (not a new port — just display logic).
 
 **Integration points:**
-- **Journal port:** provides audit trail (timestamp, exit code, error if any).
-- **ClockPort:** for "how long ago was the last run" calculations.
-- **SubvolumeRepository:** for space used (already has `list`).
+- **ClockPort:** for age calculations (latest backup age relative to now).
+- **SubvolumeRepository:** for `list(source_dir)` and `list(target_dir)`.
+- **Domain naming parser:** to extract timestamp from snapshot names.
 
 **Testing:**
-- Unit: mock repos + journal, verify status computation.
-- E2E: loopback fixture with known snapshots/backups, check reported health.
+- Unit: mock repos, verify count/age computation on fixture snapshots.
+- E2E: loopback with 3 snapshots, 2 backups; verify reported counts and ages match.
 
-### 3.2 — Snapshot diff
+### 3.2 — Snapshot diff (DEFERRED or MINIMAL v1.1)
 
-**Goal:** Show what changed between two snapshots (added/removed/modified bytes).
+**Status:** This feature has a real technical blocker. The original design was based on `btrfs send --check-parent` (which does not exist in btrfs-send(8)) and per-snapshot `btrfs filesystem usage` (which is filesystem-wide, not per-snapshot). A production-grade implementation needs either `btrfs subvolume find-new` (estimate) or FIEMAP (accurate but slow). **Recommend deferring to v1.2** unless you accept the estimate-only approach below.
 
-**Input:** Two snapshot paths (can be on same source or different sources via SSH).
+**Minimal v1.1 option (if shipped):**
+
+**Goal:** Estimate changed bytes between two snapshots (note: estimate only, not exact transfer size).
+
+**Input:** Two snapshot paths (same source only — cross-source deferred).
 
 **Output:**
 ```
-Difference between data.20260618T120000 and data.20260624T143210
-───────────────────────────────────────────────────────────────
-  Files added:      142 files, +850 MB
-  Files deleted:    8 files, -12 MB
-  Files modified:   24 files, +120 MB (net +85 MB in those 24 files)
-  Directories:      +3 new dirs, -1 deleted
-  
-Total delta:        +943 MB
+Estimate of changes from data.20260618T120000 to data.20260624T143210
+─────────────────────────────────────────────────────────────────────
+Changed bytes (estimate): +943 MB
+
+Note: This is an estimate via btrfs subvolume find-new. Actual incremental
+send may be smaller due to compression or larger due to extent rewrites.
 ```
 
 **Implementation approach:**
-- **Option A (cheaper):** Use btrfs `send --check-parent` metadata inspection — parse the send-stream header to extract delta size without actually transferring.
-- **Option B (fallback):** For offline snapshots, use `btrfs filesystem usage` or metadata comparison on each snapshot.
-- Start with Option B (guaranteed to work on any two snapshots, pure metadata read).
+- Use `btrfs subvolume find-new <newer> <older_cgen>` to estimate changed bytes.
+- Accurate enough for "how much would an incremental backup be?" decisions.
+- Does NOT provide file-by-file breakdown (that requires walking/FIEMAP, deferred).
 
 **Architecture:**
-- `DiffService` (pure, stateless) takes two `Subvolume` references, computes delta.
-- New adapter `SnapshotDiffAdapter` spawns btrfs commands to inspect each snapshot.
-- **No new ports** — reuse `SubvolumeRepository` for metadata reads.
+- New method on `SubvolumeRepository`: `find_new_estimate(&self, path: &Path, since_gen: u64) -> Result<u64, PortError>`.
+- `DiffService` (fallible, not pure) orchestrates: fetch both subvolumes, call `find_new_estimate` on the newer one with the older's cgen.
+- Integrates via CLI endpoint parser → repositories scoped to source/target.
 
 **Integration:**
-- CLI command: `mybtrfs diff <source1> <source2>` (paths, not subvolume objects; discovery in CLI).
-- Works over SSH via existing `Endpoint` parsing (e.g., `mybtrfs diff /local/snap ssh://host/snap`).
+- CLI command: `mybtrfs diff <snapshot1> <snapshot2>` (same-source only for v1.1).
+- SSH support deferred (needs cross-host cgen resolution, non-trivial).
 
 **Testing:**
-- Unit: mock snapshots with known deltas, verify computation.
-- E2E: create two loopback snapshots with known file changes, measure delta.
+- Unit: mock `find_new_estimate`, verify delta computation.
+- E2E: loopback fixture, add/modify files, verify estimate reasonably close to `btrfs send | wc -c`.
 
-### 3.3 — Retention preview polish
+**Alternative:** Defer diff entirely to v1.2 and focus v1.1 on status + retention-preview, which are lower-risk.
 
-**Goal:** Pretty-print what `prune` would delete *before* it runs (already ~90% done).
+### 3.3 — Retention preview polish (READY)
 
-**Current state:** `prune --dry-run` computes the schedule but prints in debug format:
+**Goal:** Pretty-print what `prune` would delete *before* it runs. Already ~95% done; this is primarily a UI polish.
+
+**Current state:** `prune --dry-run` computes the full schedule (`Schedule<Subvolume>` with `preserve`/`delete` partitions) but prints in debug format:
 ```
 Schedule { preserve: [...], delete: [...] }
 ```
 
-**Target output:**
+**Target output (v1.1):**
 ```
 Retention Policy: GFS (keep 7 daily, 4 weekly, 12 monthly)
 Source snapshots: /path/.snapshots/
 ──────────────────────────────────────────────────────────
-PRESERVE (7 snapshots, 3.2 GB):
+PRESERVE (7 snapshots):
   ✅ data.20260624T143210 (today)
   ✅ data.20260623T143210 (1 day ago)
   ✅ data.20260622T143210 (2 days ago)
   [...]
 
-DELETE (2 snapshots, 240 MB) — run with --yes to confirm:
-  ⚠️  data.20260617T143210 (7 days ago, 120 MB)
-  ⚠️  data.20260610T143210 (14 days ago, 120 MB)
+DELETE (2 snapshots) — run with --yes to confirm:
+  ⚠️  data.20260617T143210 (7 days ago)
+  ⚠️  data.20260610T143210 (14 days ago)
 ```
 
+**Scope for v1.1:** Names, counts, ages. **Defer** per-snapshot byte sizes to v1.2 (requires the sizing port from diff/status).
+
 **Implementation:**
-- Move the pretty-printer from `BackupService::run` into `PruneService::preview()`.
-- Add `--preview` flag to `prune` (or keep `--dry-run` and auto-format).
-- **No new logic** — just a view over the existing `Schedule` struct.
+- Extend `print_prune_report` (already exists in cli.rs:1038) to format `Schedule<T>` partitions with human-readable layout.
+- **No new port, no new service logic** — just a view over the existing `Schedule` struct.
+- Keep `--dry-run` (don't add a redundant `--preview` flag); `--dry-run` auto-formats the new output.
 
 **Testing:**
-- Unit: mock schedule, verify output format.
-- E2E: run `prune --dry-run` on loopback, verify output matches expected.
+- Unit: mock schedule with preserve/delete partitions, verify output format.
+- E2E: loopback fixture with known snapshots, run `prune --dry-run`, verify output matches expected names/counts/partition.
 
 ---
 
@@ -366,98 +378,127 @@ fn dispatch(cli: &Cli) -> Result<()> {
 
 ---
 
-## §6 — Validation & acceptability criteria
+## §6 — Validation & acceptability criteria (measurable tests)
 
 ### Status view
-- ✅ Computes health from journal + metadata (no side effects)
-- ✅ Warns on known issues (orphaned snapshots, old backups)
-- ✅ JSON output is parseable
-- ✅ Works over SSH (reads remote metadata via existing adapters)
+- **Test 1:** Run `mybtrfs status /source /target --json | jq -e '.snapshots[] | .timestamp'` 
+  on a loopback fixture with 3 snapshots. Verify timestamps parse and match snapshot names.
+- **Test 2:** `mybtrfs status /source /target` (human output) shows snapshot/backup counts 
+  matching the actual number listed by `btrfs subvolume list`.
+- **Test 3:** Age computation (e.g., "7 minutes ago") is within 1 minute of actual elapsed time.
+- **Test 4:** Works on a second target: run status against a different target filesystem.
 
 ### Snapshot diff
-- ✅ Computes delta accurately (matches manual `btrfs send --check-parent`)
-- ✅ Works for snapshots on same source or different sources
-- ✅ Handles SSH endpoints
-- ✅ Output is human-readable + machine-parseable
+- **If shipped in v1.1 (estimate-only version):**
+  - **Test 1:** Run `mybtrfs diff /snap1 /snap2` and get a single number (estimated delta bytes).
+  - **Test 2:** Estimate (via `find-new`) is within ±20% of actual `btrfs send -p /snap1 /snap2 | wc -c`.
+  - **Test 3:** Error handling: diff on snapshots from different filesystems produces a clear error.
+  - **Note:** Per-file breakdown and SSH support are deferred to v1.2.
+- **If deferred to v1.2:** Feature not present; no tests.
 
 ### Retention preview
-- ✅ Output matches what `prune --yes` would actually delete
-- ✅ Formatting is clear (preserve vs. delete, reasons)
-- ✅ `--preview` flag suppresses deletion (dryrun mode)
+- **Test 1:** Run `prune --dry-run` and verify the output lists exactly the snapshots 
+  that a subsequent `prune --yes` would delete (set equality).
+- **Test 2:** PRESERVE and DELETE sections are clearly labeled; counts match list length.
+- **Test 3:** Names are legible (snapshot path basename, not full path or debug format).
 
 ---
 
-## §7 — Phasing & timeline
+## §7 — Phasing & timeline (revised after design review)
 
-**Phase 1 (week 1):** Spec and unit tests (TDD)
-- Write failing tests for `StatusService`, `DiffService`, `PruneService::preview()`
-- Implement to green
+**Recommended sequencing:** Ship the three features in order of risk/dependencies.
 
-**Phase 2 (week 2):** Integration and CLI
-- Wire services into CLI dispatch
-- Add new commands (`status`, `diff`, update `prune --preview`)
-- Integration tests with loopback fixtures
+**Phase 1: Retention preview (week 1)**
+- Extend `print_prune_report` to format `Schedule<T>` with preserve/delete lists, names, ages.
+- Unit test: mock schedule, verify output format.
+- E2E: loopback with 3 snapshots matching a policy, verify output names match deleted snapshot names.
+- **Goal:** Ship this as v1.1.0 first (cleanest, no new ports, validates the "query" pattern).
 
-**Phase 3 (week 3):** Polish & documentation
-- Output formatting, error messages
-- Update CLAUDE.md with new commands
-- Man page entries
+**Phase 2: Status view (week 2–3)**
+- Write `StatusService` (compute snapshot/backup counts + ages from metadata).
+- Add `status` CLI command.
+- Unit tests: mock repos, verify count/age on fixture.
+- E2E: loopback with 2 sources, 2 targets; verify status output for each.
+- **Goal:** Ship as v1.1.1 or iterate if issues arise.
 
-**Phase 4 (release):** Tag v1.1, ship
+**Phase 3: Snapshot diff (week 4, or defer)**
+- **Option A (ship as estimate-only):**
+  - Add `find_new_estimate` method to `SubvolumeRepository`.
+  - Write `DiffService`, add `diff` CLI command.
+  - Unit + E2E tests (estimate vs. actual `send` size).
+- **Option B (defer to v1.2):**
+  - Remove diff from v1.1 entirely. Cuts 1 week of work.
+- **Recommendation:** Assess after Phase 2. If time/risk is tight, defer diff.
+
+**Phase 4: Documentation & release**
+- Update CLAUDE.md, man pages.
+- Tag v1.1 (or v1.1.1 if diff is deferred).
+
+**Realistic timeline:** 3–4 weeks for all three, or 2 weeks for status+preview (defer diff).
 
 ---
 
-## §8 — Known risks & mitigations
+## §8 — Known risks & mitigations (revised)
 
-| Risk | Mitigation |
-|------|-----------|
-| Journal port absent or empty (no audit trail) | `StatusService` gracefully handles missing journal; shows "no audit history" |
-| Diff computation on large snapshots is slow | Start with metadata-only diff; add streaming option later if needed |
-| CLI argument parsing for endpoints (local/ssh) is error-prone | Reuse existing `parse_endpoint()` from adapters; boundary parser rejects malformed |
-| Retention logic drift between `schedule()` and `preview()` | Both use same `Schedule` struct & policy; unit tests verify consistency |
+| Risk | Status | Mitigation |
+|------|--------|-----------|
+| **Status view re-derives from metadata only (not journal)** | **Accepted trade-off** | Journal is write-only; reading it would require a new `JournalReader` port. Metadata-derived approach (snapshot/backup names) is stateless and simpler. Stateful issue tracking deferred to v1.2. |
+| **Snapshot diff (find-new) is an estimate, not exact** | **If shipped** | Document clearly: "estimate via `btrfs subvolume find-new`; actual send may differ due to compression/rewrites." Run E2E tests to verify accuracy on loopback fixtures. |
+| **find-new estimate can over-count (extent rewrites)** | **If shipped** | Accept ±20% margin in acceptance tests; if higher error observed, defer diff to v1.2 for FIEMAP-based exact diff. |
+| **Diff on large snapshots may be slow** | **If shipped** | `find-new` is fast; FIEMAP (v1.2 alternative) is slower but more accurate. v1.1 uses find-new. |
+| **Empty repos (zero snapshots / zero backups)** | **For status** | Edge case: status on empty source/target should report "0 snapshots, 0 backups" clearly, not error or misreport. Unit test: fixture with empty directory. |
+| **Retention logic drift between `schedule()` and `preview()` output** | **For preview** | Both use same `Schedule<T>` struct; unit test asserts `preview().delete` set-equals actual prune deletions on loopback. |
+| **SSH endpoint parsing or SSH mount-table** | **Deferred** | Diff-over-SSH and status-over-SSH are deferred to v1.2 (requires two-repo SSH routing, non-trivial). v1.1 is local-source only or requires local destination with remote repos mounted. |
 
 ---
 
 ## §9 — Deferred / future work
 
-**v2.x candidates** (not in scope for v1.x):
-- Backup-set file (needs more design, not blocking v1.x)
-- Native encryption (needs infrastructure; designed in `08 §3`)
-- TUI snapshot browser (separate product decision)
-- Restorability check (`scrub`-aware verification)
+**v1.2+ candidates** (not in scope for v1.1):
+- **Per-snapshot space accounting** (requires a sizing port; deferred from v1.1 status/retention-preview/diff)
+- **File-by-file snapshot diff** (requires FIEMAP or equivalent; deferred from v1.1 diff)
+- **SSH support for status/diff** (requires multi-repo SSH routing; deferred)
+- **Native encryption** (highest-value v2 feature; designed in `08 §3`, needs infra)
+- **Restorability check** (`scrub`-aware verification)
+- **TUI snapshot browser** (separate product scope; decide consciously)
+- **Backup-set file** (multi-subvolume cron sugar; v1.2 if needed)
 
 ---
 
-## Appendix: Code structure sketch
+## Appendix: Code structure sketch (revised)
 
 ```
 crates/application/src/
 ├── status.rs          [NEW: StatusService, StatusReport struct]
-├── diff.rs            [NEW: DiffService, DiffSummary struct]
-├── prune.rs           [MODIFY: add preview() method]
-└── ports.rs           [NO CHANGE: reuse existing ports]
+├── diff.rs            [NEW (optional): DiffService, DiffSummary; deferred if risk too high]
+├── prune.rs           [MODIFY: extend print_prune_report for pretty output]
+└── ports.rs           [EXTEND: add find_new_estimate method to SubvolumeRepository (if diff shipped)]
 
 crates/adapters/src/
-└── btrfs_cli.rs       [MINIMAL: extend queries if needed for diff]
+└── btrfs_cli.rs       [EXTEND: if diff shipped, add find_new_estimate impl calling btrfs]
 
 crates/cli/src/
-├── cli.rs             [MODIFY: add Status/Diff commands, update Prune]
-└── output.rs          [NEW (optional): shared formatting for status/diff/prune]
+├── cli.rs             [MODIFY: add Status command, update Prune for pretty output, optional Diff]
+└── (no new output module needed; formatting in services/CLI)
+
+domain/
+└── [NO CHANGES]
 
 documentation/
-└── 10-v1x-plan.md    [THIS FILE]
+└── 10-v1x-plan.md    [THIS FILE — revised]
 ```
 
 ---
 
 ## Signoff
 
-**This plan:**
-- ✅ Stays true to hexagonal architecture (new read-only services, no domain changes)
+**This revised plan:**
+- ✅ Honestly reflects real implementation costs (status, diff) and gains (retention preview)
+- ✅ Stays true to hexagonal architecture (read-only services, no domain changes, single new port method if diff shipped)
 - ✅ Follows SOLID principles (single responsibility, dependency inversion)
-- ✅ Adheres to clean-code practices (no unwrap, docs, type safety)
-- ✅ Integrates cleanly with existing ports/adapters/services
-- ✅ Validates in-sandbox (no new infra needed)
-- ✅ Aligns with v1.x roadmap (observability + visibility)
+- ✅ Adheres to clean-code practices (no unwrap, docs, type safety, tested boundaries)
+- ✅ Validates in-sandbox (loopback fixtures for all features)
+- ✅ Addresses design-review blockers (journal is read-only, no size field, btrfs flags are real)
+- ✅ De-risks the release (prioritize retention-preview, make diff optional, defer bytes to v1.2)
 
-**Ready to implement:** Yes, pending review feedback on prioritization or design changes.
+**Ready to implement:** Yes. Follow the phasing in §7: retention-preview (week 1), status (weeks 2–3), diff-or-defer (week 4).
