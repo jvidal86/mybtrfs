@@ -26,6 +26,7 @@ use mybtrfs_application::ports::{
 use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::{RestoreReport, RestoreService};
 use mybtrfs_application::retention::RetentionService;
+use mybtrfs_application::retention_preview;
 use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
@@ -1036,12 +1037,23 @@ fn print_resume_report(report: &ResumeReport) {
 /// counts describe what *would* be deleted (the per-path lines came from the
 /// dry-run delete port).
 fn print_prune_report(report: &PruneReport, dry_run: bool) {
-    let verb = if dry_run { "would prune" } else { "pruned" };
-    println!(
-        "{verb} {} snapshot(s), {} backup(s)",
-        report.snapshots_pruned.delete.len(),
-        report.backups_pruned.delete.len()
-    );
+    if dry_run {
+        println!();
+        println!("Retention Policy Preview — Snapshot Side");
+        println!("─────────────────────────────────────");
+        println!("{}", retention_preview::format_schedule(&report.snapshots_pruned));
+        println!();
+        println!("Retention Policy Preview — Backup Side");
+        println!("─────────────────────────────────────");
+        println!("{}", retention_preview::format_schedule(&report.backups_pruned));
+    } else {
+        let verb = "pruned";
+        println!(
+            "{verb} {} snapshot(s), {} backup(s)",
+            report.snapshots_pruned.delete.len(),
+            report.backups_pruned.delete.len()
+        );
+    }
 }
 
 /// Print a one-fact-per-line summary of a restore. On a dry run the lines
