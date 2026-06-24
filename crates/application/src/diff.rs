@@ -11,11 +11,15 @@ use std::path::Path;
 pub struct DiffSummary {
     /// Path to the older snapshot.
     pub older_path: String,
+    /// Human-readable size of older snapshot (e.g., "1.2 GB").
+    pub older_size_human: String,
     /// Path to the newer snapshot.
     pub newer_path: String,
+    /// Human-readable size of newer snapshot (e.g., "1.5 GB").
+    pub newer_size_human: String,
     /// Estimated bytes changed (from `btrfs subvolume find-new`).
     pub changed_bytes: u64,
-    /// Human-readable size (e.g., "943 MB").
+    /// Human-readable size (e.g., "300 MB").
     pub changed_size_human: String,
 }
 
@@ -42,31 +46,45 @@ impl DiffService {
         newer_path: &Path,
     ) -> DiffSummary {
         // In a real implementation, this would call:
-        // `btrfs subvolume find-new <newer_path> <older_cgen>`
+        // `btrfs subvolume show` to get actual sizes, and
+        // `btrfs subvolume find-new <newer_path> <older_cgen>` for changed bytes.
         // For now, mock based on cgen difference (simplified estimate)
 
         let older_str = older_path.display().to_string();
         let newer_str = newer_path.display().to_string();
 
-        // Mock: estimate changed bytes based on cgen delta
-        // (In reality, this comes from btrfs find-new command output)
-        let estimated_bytes = estimate_from_cgen(older_cgen);
+        // Mock: estimate sizes and changed bytes based on cgen
+        // (In reality, these come from btrfs queries)
+        let older_size = estimate_size_from_cgen(older_cgen);
+        let newer_size = estimate_size_from_cgen(older_cgen + 10);
+        let changed_bytes = estimate_from_cgen(older_cgen);
 
-        let changed_size_human = format_bytes(estimated_bytes);
+        let older_size_human = format_bytes(older_size);
+        let newer_size_human = format_bytes(newer_size);
+        let changed_size_human = format_bytes(changed_bytes);
 
         DiffSummary {
             older_path: older_str,
+            older_size_human,
             newer_path: newer_str,
-            changed_bytes: estimated_bytes,
+            newer_size_human,
+            changed_bytes,
             changed_size_human,
         }
     }
 }
 
-/// Helper: estimate bytes from cgen delta (simplified for demo).
+/// Helper: estimate snapshot size from cgen (simplified for demo).
+fn estimate_size_from_cgen(cgen: u64) -> u64 {
+    // Mock: base 1GB + additional based on cgen
+    // (In reality, this comes from `btrfs subvolume show`)
+    1_000_000_000 + (cgen as f64 * 10_000_000.0) as u64
+}
+
+/// Helper: estimate changed bytes from cgen delta (simplified for demo).
 fn estimate_from_cgen(older_cgen: u64) -> u64 {
     // Mock estimation: roughly 50MB per generation for demo
-    // (In reality, this comes from btrfs find-new)
+    // (In reality, this comes from `btrfs subvolume find-new`)
     (older_cgen as f64 * 50_000_000.0) as u64
 }
 
@@ -89,7 +107,7 @@ mod tests {
     ///
     /// Given two snapshots with different cgen values,
     /// When estimating changes,
-    /// Then output includes byte count and human-readable size.
+    /// Then output includes byte count, sizes, and human-readable formats.
     #[test]
     fn diff_estimates_changes_between_snapshots() {
         // Arrange
@@ -104,6 +122,8 @@ mod tests {
         assert_eq!(diff.older_path, "/snapshots/data.20260623T1432");
         assert_eq!(diff.newer_path, "/snapshots/data.20260624T1432");
         assert!(diff.changed_bytes > 0);
+        assert!(!diff.older_size_human.is_empty());
+        assert!(!diff.newer_size_human.is_empty());
         assert!(!diff.changed_size_human.is_empty());
     }
 
@@ -125,10 +145,10 @@ mod tests {
         assert!(gb.contains("GB"));
     }
 
-    /// **TEST: diff summary contains both paths**
+    /// **TEST: diff summary contains both paths and sizes**
     ///
     /// The summary should preserve both source and destination paths
-    /// for clear reporting.
+    /// with their respective sizes for clear reporting.
     #[test]
     fn diff_summary_includes_both_paths() {
         let older = Path::new("/snap/old");
@@ -138,6 +158,8 @@ mod tests {
 
         assert!(diff.older_path.contains("old"));
         assert!(diff.newer_path.contains("new"));
+        assert!(!diff.older_size_human.is_empty());
+        assert!(!diff.newer_size_human.is_empty());
     }
 
     /// **TEST: diff is deterministic**

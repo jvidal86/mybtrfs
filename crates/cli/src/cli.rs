@@ -1216,7 +1216,14 @@ fn print_status(report: &mybtrfs_application::status::StatusReport) {
 
 /// Print snapshot diff summary.
 fn print_diff(diff: &mybtrfs_application::diff::DiffSummary) {
-    println!("{} -> {}: {}", diff.older_path, diff.newer_path, diff.changed_size_human);
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        diff.older_path,
+        diff.older_size_human,
+        diff.newer_path,
+        diff.newer_size_human,
+        diff.changed_size_human
+    );
 }
 
 /// Print the discovered btrfs filesystems (backup-target candidates).
