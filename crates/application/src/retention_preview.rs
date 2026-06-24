@@ -78,7 +78,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify output contains "DELETE" header
@@ -107,7 +107,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify PRESERVE section appears before DELETE section
@@ -133,7 +133,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify PRESERVE section shows "(0 snapshots)" or is omitted gracefully
@@ -157,7 +157,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify PRESERVE section shows both snapshots
@@ -180,7 +180,7 @@ mod tests {
         };
 
         // Act
-        let output = format_schedule(&schedule);
+        let _output = format_schedule(&schedule);
 
         // Assert
         // TODO: verify snapshot name is present and readable in output
