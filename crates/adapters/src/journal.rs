@@ -25,6 +25,11 @@ impl FileJournal {
 
 impl Journal for FileJournal {
     fn record(&self, message: &str) -> Result<(), PortError> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)

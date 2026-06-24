@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use mybtrfs_adapters::{
     AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, IndicatifProgress,
-    LocalFsAdapter, LsblkDriveDiscovery, NullJournal, StdioPrompter, SystemClock, parse_endpoint,
+    LocalFsAdapter, LsblkDriveDiscovery, StdioPrompter, SystemClock, parse_endpoint,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
@@ -523,11 +523,33 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Box::new(StdioPrompter::new())
     };
     // Audit the invocation to the journal (if configured); a journal failure is
-    // logged but never aborts the command.
+    // logged but never aborts the command. Default to /var/log/mybtrfs.journal,
+    // with fallback to ~/.local/share/mybtrfs/journal (works under sudo).
     let journal: Box<dyn Journal> = match &cli.journal {
         Some(path) => Box::new(FileJournal::new(path.clone())),
-        None => Box::new(NullJournal),
+        None => {
+            let default_journal = if can_write_to("/var/log") {
+                PathBuf::from("/var/log/mybtrfs.journal")
+            } else if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(home).join(".local/share/mybtrfs/journal")
+            } else {
+                PathBuf::from("/tmp/mybtrfs.journal")
+            };
+            Box::new(FileJournal::new(default_journal))
+        }
     };
+
+    fn can_write_to(dir: &str) -> bool {
+        use std::fs::OpenOptions;
+        let test_file = format!("{}/.mybtrfs-write-test", dir);
+        let result = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&test_file)
+            .is_ok();
+        let _ = std::fs::remove_file(&test_file);
+        result
+    }
     if let Err(err) = journal.record(&format!(
         "{} {}",
         clock.now().to_rfc3339(),
