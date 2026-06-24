@@ -51,6 +51,7 @@ again in the relevant phases:
 | `prune` | delete per policy only | RetentionService |
 | `restore` | restore a backup to a working subvolume | RestoreService |
 | `list` / `stats` / `list-drives` | read-only inventory | InventoryService |
+| `list-subvolumes` | read-only: every btrfs subvolume on the local system (all filesystems) — pick a backup source | LocalSubvolumesService (DriveDiscovery + SubvolumeRepository) |
 
 **Retention — keep-all by default (btrbk-faithful):** nothing is deleted unless a
 policy is supplied via `--snapshot-preserve[-min]` and/or `--target-preserve[-min]`

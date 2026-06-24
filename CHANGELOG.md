@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **`list-subvolumes` command:** lists every btrfs subvolume on the local system, across all mounted btrfs filesystems, for picking a backup source. Read-only; tab-separated output (`id  path  fs-mountpoint  uuid  ro|rw`). Complements `list-drives` (which lists the filesystems themselves). Implemented as a `LocalSubvolumesService` use case composing the existing `DriveDiscoveryPort` (lsblk) and `SubvolumeRepository` (`btrfs subvolume list`) ports — no new port. Requires root (runs `btrfs subvolume list`), so it exits with code 4 without it, like `list`.
+
 ### Planned for v1.x ("make it visible")
 
 - Status view backed by journal (visibility into last-run health)

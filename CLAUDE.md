@@ -86,7 +86,7 @@ The design is the spec; read it before implementing. **The `-v2` files supersede
 their originals.**
 
 - **`01-phases-design-v2.md`** — functional design (Phases 1–4) + the decided CLI
-  surface (`run`/`snapshot`/`resume`/`prune`/`restore`/`list`/`stats`/`list-drives`,
+  surface (`run`/`snapshot`/`resume`/`prune`/`restore`/`list`/`stats`/`status`/`diff`/`list-drives`/`list-subvolumes`,
   keep-all-by-default retention, auto-create dirs).
 - **`02-architecture-v2.md`** — hexagonal architecture, sequence diagrams, and the
   numbered fail-safe invariants (§6).

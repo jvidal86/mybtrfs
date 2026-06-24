@@ -230,6 +230,26 @@ fn list_without_root_exits_code_4() {
 }
 
 #[test]
+fn list_subvolumes_without_root_exits_code_4() {
+    // E2E-CC-10: `list-subvolumes` discovers filesystems via `lsblk` (no root) but
+    // then runs `btrfs subvolume list` on each, which denies permission without
+    // root. Must exit 4, like `list`. Skipped if root or no btrfs (the error
+    // would not occur).
+    if btrfs_path_if_not_root().is_none() {
+        return;
+    }
+
+    let lock = temp_path("list-subvols-no-root-lock");
+    let status = Command::new(BIN)
+        .args(["list-subvolumes", "--lock", lock.to_str().unwrap()])
+        .status()
+        .unwrap();
+
+    assert_eq!(status.code(), Some(4), "no-root list-subvolumes → exit 4");
+    std::fs::remove_file(&lock).ok();
+}
+
+#[test]
 fn list_drives_does_not_require_root() {
     // E2E-CC-10: negative test — `list-drives` uses `lsblk` (not `btrfs`), so it
     // must **not** require root and must **not** exit 4. This guards against

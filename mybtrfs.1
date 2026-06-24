@@ -284,10 +284,53 @@ Target directory (local or remote SSH endpoint).
 .RE
 
 .TP
+.B status \fISNAPSHOT_DIR TARGET\fR
+Show backup health: snapshot and backup counts, the age of the latest snapshot
+and backup, and health checks (e.g., missing or incomplete backups). Read\-only.
+
+.B Arguments:
+.RS
+.TP
+\fISNAPSHOT_DIR\fR
+Directory holding the source snapshots.
+
+.TP
+\fITARGET\fR
+Target directory (local or remote SSH endpoint).
+.RE
+
+.TP
+.B diff \fIOLDER_SNAPSHOT NEWER_SNAPSHOT\fR
+Estimate the changed bytes between two snapshots \(em useful for sizing an
+incremental backup before running it.
+
+.B Arguments:
+.RS
+.TP
+\fIOLDER_SNAPSHOT\fR
+Path to the older (base) snapshot.
+
+.TP
+\fINEWER_SNAPSHOT\fR
+Path to the newer snapshot.
+.RE
+
+.TP
 .B list\-drives
 List candidate btrfs drives for backup targets. Shows all discovered btrfs
 filesystems with their mount points and available space. Helps with drive
 auto-selection.
+
+.TP
+.B list\-subvolumes
+List every btrfs subvolume on the local system, across all mounted btrfs
+filesystems \(em the units you can pick as a backup \fISOURCE\fR. Output is
+tab\-separated under a header row (\fBID PATH FS\-MOUNTPOINT UUID RO/RW\fR), one
+subvolume per line; \fB\-\-quiet\fR drops the header for scripting (pipe to
+\fBcolumn \-t\fR to align). Read\-only, but requires root (it runs
+\fBbtrfs subvolume list\fR), so it exits with code \fB4\fR without it. Complements
+\fBlist\-drives\fR, which lists the filesystems themselves rather than their
+subvolumes.
 
 .SH RETENTION POLICIES
 Retention policies use a btrbk-style format with two layers: a minimum-keep

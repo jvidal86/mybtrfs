@@ -19,6 +19,7 @@ use mybtrfs_adapters::{
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
+use mybtrfs_application::local_subvolumes::LocalSubvolumesService;
 use mybtrfs_application::ports::{
     ClockPort, DeleteCommit, DeletePort, DiscoveredFilesystem, DriveDiscoveryPort, FilesystemPort,
     Journal, PortError, Prompter,
@@ -27,6 +28,7 @@ use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::{RestoreReport, RestoreService};
 use mybtrfs_application::retention::RetentionService;
 use mybtrfs_application::retention_preview;
+use mybtrfs_domain::model::{Subvolume, Uuid};
 use mybtrfs_domain::naming::TimestampFormat;
 use mybtrfs_domain::parent::Incremental;
 use mybtrfs_domain::retention::RetentionPolicy;
@@ -395,6 +397,13 @@ enum Command {
     },
     /// List candidate backup drives (Phase 1 UX).
     ListDrives,
+    /// List every btrfs subvolume on the local system — across all mounted btrfs
+    /// filesystems — for picking a backup source. Output is tab-separated under a
+    /// header row (`ID PATH FS-MOUNTPOINT UUID RO/RW`), one subvolume per line;
+    /// `--quiet` drops the header for scripting (pipe to `column -t` to align).
+    /// Read-only; requires root (it runs `btrfs subvolume list`). Use `list-drives`
+    /// to see the filesystems themselves rather than their subvolumes.
+    ListSubvolumes,
 }
 
 /// `btrfs send -p` strategy, mirroring [`Incremental`]; defaults to `yes`.
@@ -658,6 +667,16 @@ fn dispatch(cli: &Cli) -> Result<()> {
             print_drives(&drives);
             Ok(())
         }
+        Command::ListSubvolumes => {
+            progress.start_spinner("Scanning subvolumes…");
+            let discovery = LsblkDriveDiscovery::new();
+            let subvolumes = LocalSubvolumesService::new(&discovery, &btrfs)
+                .list_all()
+                .context("listing subvolumes failed")?;
+            progress.finish("");
+            print_subvolumes(&subvolumes, cli.quiet);
+            Ok(())
+        }
         Command::Restore {
             backup,
             dest,
@@ -865,7 +884,8 @@ fn command_mutates(command: &Command) -> bool {
         | Command::Stats { .. }
         | Command::Status { .. }
         | Command::Diff { .. }
-        | Command::ListDrives => false,
+        | Command::ListDrives
+        | Command::ListSubvolumes => false,
     }
 }
 
@@ -1033,6 +1053,7 @@ fn describe_command(command: &Command) -> String {
         Command::Status { .. } => "status".to_owned(),
         Command::Diff { .. } => "diff".to_owned(),
         Command::ListDrives => "list-drives".to_owned(),
+        Command::ListSubvolumes => "list-subvolumes".to_owned(),
     }
 }
 
@@ -1244,6 +1265,34 @@ fn print_drives(drives: &[DiscoveredFilesystem]) {
             drive.mountpoint.display(),
             drive.device.display(),
             drive.fs_uuid
+        );
+    }
+}
+
+/// Print the local btrfs subvolumes, one tab-separated line each
+/// (`id  path  fs-mountpoint  uuid  ro|rw`) — awk-friendly, matching the
+/// `list-drives`/`diff` house style. `path` is relative to its filesystem
+/// mountpoint, so `<fs-mountpoint>/<path>` is the on-disk location.
+///
+/// A tab-separated header row is printed first for readability (it aligns with
+/// the data under `column -t`); `--quiet` suppresses it so scripting / awk
+/// pipelines get headerless output.
+fn print_subvolumes(subvolumes: &[Subvolume], quiet: bool) {
+    if subvolumes.is_empty() {
+        println!("no btrfs subvolumes found");
+        return;
+    }
+    if !quiet {
+        println!("ID\tPATH\tFS-MOUNTPOINT\tUUID\tRO/RW");
+    }
+    for sv in subvolumes {
+        let uuid = sv.uuid.as_ref().map_or("-".to_owned(), Uuid::to_string);
+        let kind = if sv.readonly { "ro" } else { "rw" };
+        println!(
+            "{}\t{}\t{}\t{uuid}\t{kind}",
+            sv.id,
+            sv.path.display(),
+            sv.mountpoint.display(),
         );
     }
 }
