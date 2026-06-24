@@ -107,6 +107,7 @@ impl BtrfsCliAdapter {
             .ok_or_else(|| PortError::Command(format!("no btrfs filesystem contains {path:?}")))?;
         let mountpoint = mount.mountpoint.clone();
         let subvol = mount.subvol.clone();
+        log::debug!("btrfs filesystem show {:?}", mountpoint);
         let output = self.runner.run(
             BTRFS,
             &[
@@ -131,6 +132,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
         // `show` is given the real path, so its mountpoint-relative `relative_path`
         // is already correct; the mount subvol is only needed to re-base `list`.
         let (mountpoint, fs_uuid, _subvol) = self.resolve(path)?;
+        log::debug!("btrfs subvolume show {:?}", path);
         let output = self.runner.run(
             BTRFS,
             &[
@@ -152,6 +154,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
         // Display flags match btrbk: -a (all) -c (cgen) -u (uuid) -q (parent_uuid)
         // -R (received_uuid). The read-only flag is only available via -r, so a
         // second call provides it and `parse_list` merges the two.
+        log::debug!("btrfs subvolume list -a -c -u -q -R {:?}", filesystem);
         let listing = self.runner.run(
             BTRFS,
             &[
@@ -165,6 +168,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
                 filesystem.as_os_str(),
             ],
         )?;
+        log::debug!("btrfs subvolume list -a -r {:?}", filesystem);
         let readonly = self.runner.run(
             BTRFS,
             &[
@@ -189,6 +193,7 @@ impl SubvolumeRepository for BtrfsCliAdapter {
 
 impl SnapshotPort for BtrfsCliAdapter {
     fn create_readonly(&self, source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
+        log::debug!("btrfs subvolume snapshot -r {:?} {:?}", source, dest);
         self.runner.run(
             BTRFS,
             &[
@@ -211,6 +216,11 @@ impl SnapshotPort for BtrfsCliAdapter {
     fn make_writable(&self, source: &Path, dest: &Path) -> Result<Subvolume, PortError> {
         // No `-r`: the only sanctioned route to a writable subvolume (restore);
         // never `btrfs property set ro=false`, which poisons received_uuid (invariant #7).
+        log::debug!(
+            "btrfs subvolume snapshot {:?} {:?} (writable)",
+            source,
+            dest
+        );
         self.runner.run(
             BTRFS,
             &[
@@ -276,6 +286,11 @@ impl TransferPort for BtrfsCliAdapter {
         // Send/receive, then ALWAYS inspect the target: even on a pipe error a
         // partially-received (garbled) subvolume may be left behind and must be
         // cleaned up (invariant #2); a success is never trusted on exit code (#1).
+        log::debug!(
+            "btrfs send {:?} | btrfs receive {:?}",
+            source_path,
+            target_dir
+        );
         let transfer = self
             .runner
             .pipe((BTRFS, &send_args), (BTRFS, &receive_args), on_progress);
@@ -313,6 +328,7 @@ impl TransferPort for BtrfsCliAdapter {
 
 impl DeletePort for BtrfsCliAdapter {
     fn delete(&self, path: &Path, commit: DeleteCommit) -> Result<(), PortError> {
+        log::debug!("btrfs subvolume delete {:?} (commit={:?})", path, commit);
         let mut args: Vec<&OsStr> = vec![OsStr::new("subvolume"), OsStr::new("delete")];
         if matches!(commit, DeleteCommit::Each) {
             args.push(OsStr::new("--commit-each"));

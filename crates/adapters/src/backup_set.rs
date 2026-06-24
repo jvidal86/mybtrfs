@@ -5,6 +5,35 @@
 
 use std::path::PathBuf;
 
+/// Extract an optional string field from a TOML table entry.
+///
+/// Returns `Ok(None)` when the key is absent, `Ok(Some(s))` when it is a string,
+/// and `Err` when the key is present but is not a string (rule 16: present-but-malformed
+/// is a parse error, never a silent coercion).
+fn opt_str(obj: &toml::Table, key: &str, idx: usize) -> Result<Option<String>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_str()
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| format!("backup[{idx}].{key} must be a string")),
+    }
+}
+
+/// Extract an optional non-negative integer field from a TOML table entry.
+///
+/// Returns `Ok(None)` when absent, `Ok(Some(n))` when an integer, and `Err` when
+/// present but not an integer (rule 16).
+fn opt_usize(obj: &toml::Table, key: &str, idx: usize) -> Result<Option<usize>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_integer()
+            .map(|n| Some(n as usize))
+            .ok_or_else(|| format!("backup[{idx}].{key} must be an integer")),
+    }
+}
+
 /// A single backup entry parsed from a backup-set file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupEntry {
@@ -50,9 +79,8 @@ pub struct BackupEntry {
 /// Returns an error if the TOML is malformed or lacks required fields.
 #[must_use]
 pub fn parse_backup_set(content: &str) -> Result<Vec<BackupEntry>, String> {
-    use toml::Table;
-
-    let table: Table = toml::from_str(content).map_err(|e| format!("TOML parse error: {}", e))?;
+    let table: toml::Table =
+        toml::from_str(content).map_err(|e| format!("TOML parse error: {}", e))?;
 
     let mut entries = Vec::new();
 
@@ -105,69 +133,24 @@ pub fn parse_backup_set(content: &str) -> Result<Vec<BackupEntry>, String> {
                 .parse::<PathBuf>()
                 .map_err(|_| format!("backup[{}].target_dir is not a valid path", idx))?;
 
-            let incremental = obj
-                .get("incremental")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let incremental = opt_str(obj, "incremental", idx)?;
 
-            let snapshot_preserve_min = obj
-                .get("snapshot_preserve_min")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let snapshot_preserve_hourly = obj
-                .get("snapshot_preserve_hourly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let snapshot_preserve_daily = obj
-                .get("snapshot_preserve_daily")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let snapshot_preserve_weekly = obj
-                .get("snapshot_preserve_weekly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let snapshot_preserve_monthly = obj
-                .get("snapshot_preserve_monthly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let snapshot_preserve_yearly = obj
-                .get("snapshot_preserve_yearly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
+            let snapshot_preserve_min = opt_str(obj, "snapshot_preserve_min", idx)?;
+            let snapshot_preserve_hourly = opt_usize(obj, "snapshot_preserve_hourly", idx)?;
+            let snapshot_preserve_daily = opt_usize(obj, "snapshot_preserve_daily", idx)?;
+            let snapshot_preserve_weekly = opt_usize(obj, "snapshot_preserve_weekly", idx)?;
+            let snapshot_preserve_monthly = opt_usize(obj, "snapshot_preserve_monthly", idx)?;
+            let snapshot_preserve_yearly = opt_usize(obj, "snapshot_preserve_yearly", idx)?;
 
-            let target_preserve_min = obj
-                .get("target_preserve_min")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let target_preserve_hourly = obj
-                .get("target_preserve_hourly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let target_preserve_daily = obj
-                .get("target_preserve_daily")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let target_preserve_weekly = obj
-                .get("target_preserve_weekly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let target_preserve_monthly = obj
-                .get("target_preserve_monthly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
-            let target_preserve_yearly = obj
-                .get("target_preserve_yearly")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize);
+            let target_preserve_min = opt_str(obj, "target_preserve_min", idx)?;
+            let target_preserve_hourly = opt_usize(obj, "target_preserve_hourly", idx)?;
+            let target_preserve_daily = opt_usize(obj, "target_preserve_daily", idx)?;
+            let target_preserve_weekly = opt_usize(obj, "target_preserve_weekly", idx)?;
+            let target_preserve_monthly = opt_usize(obj, "target_preserve_monthly", idx)?;
+            let target_preserve_yearly = opt_usize(obj, "target_preserve_yearly", idx)?;
 
-            let pre_snapshot_hook = obj
-                .get("pre_snapshot_hook")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let post_snapshot_hook = obj
-                .get("post_snapshot_hook")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let pre_snapshot_hook = opt_str(obj, "pre_snapshot_hook", idx)?;
+            let post_snapshot_hook = opt_str(obj, "post_snapshot_hook", idx)?;
 
             entries.push(BackupEntry {
                 source,
@@ -301,6 +284,28 @@ post_snapshot_hook = "unfreeze-db.sh"
         assert_eq!(
             entries[0].post_snapshot_hook,
             Some("unfreeze-db.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn wrong_type_field_is_an_error_not_silent_none() {
+        // snapshot_preserve_daily must be an integer; passing a string violates rule 16.
+        let toml = r#"
+[[backup]]
+source = "/data"
+snapshot_dir = "/snapshots"
+basename = "data"
+target_dir = "/backup"
+snapshot_preserve_daily = "seven"
+"#;
+        let err = parse_backup_set(toml).unwrap_err();
+        assert!(
+            err.contains("snapshot_preserve_daily"),
+            "error should name the offending field, got: {err}"
+        );
+        assert!(
+            err.contains("integer"),
+            "error should state the expected type, got: {err}"
         );
     }
 
