@@ -1216,14 +1216,7 @@ fn print_status(report: &mybtrfs_application::status::StatusReport) {
 
 /// Print snapshot diff summary.
 fn print_diff(diff: &mybtrfs_application::diff::DiffSummary) {
-    println!(
-        "Estimate of changes from {} to {}",
-        diff.older_path, diff.newer_path
-    );
-    println!("──────────────────────────────────────────────────────────────────");
-    println!("Changed bytes (estimate): {}", diff.changed_size_human);
-    println!();
-    println!("💡 This means an incremental backup would transfer ~{}", diff.changed_size_human);
+    println!("{} -> {}: {}", diff.older_path, diff.newer_path, diff.changed_size_human);
 }
 
 /// Print the discovered btrfs filesystems (backup-target candidates).
