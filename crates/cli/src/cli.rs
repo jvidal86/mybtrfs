@@ -788,10 +788,71 @@ fn dispatch(cli: &Cli) -> Result<()> {
             newer_snapshot,
         } => {
             use mybtrfs_application::diff::DiffService;
-            // For Phase 3, we estimate based on snapshot naming (simplified).
-            // In production, this would use btrfs subvolume find-new with actual cgen.
-            let older_cgen = 100u64; // Placeholder: extract from actual snapshot metadata
-            let diff = DiffService::estimate_changes(older_snapshot, older_cgen, newer_snapshot);
+            use std::process::Command;
+
+            let older_str = older_snapshot.to_string_lossy();
+            let newer_str = newer_snapshot.to_string_lossy();
+
+            // Get cgen (change generation) from older snapshot
+            let show_old = Command::new("btrfs")
+                .args(&["subvolume", "show", &older_str])
+                .output()
+                .context("failed to run btrfs subvolume show on older snapshot")?;
+            let show_old_output = String::from_utf8_lossy(&show_old.stdout);
+            let older_cgen = show_old_output
+                .lines()
+                .find(|l| l.contains("Generation (Gen):"))
+                .and_then(|l| l.split(':').last())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+
+            // Get actual size of older snapshot (use Referenced field as proxy)
+            let older_bytes = show_old_output
+                .lines()
+                .find(|l| l.contains("Referenced:"))
+                .and_then(|l| l.split(':').last())
+                .and_then(|s| parse_size_bytes(s))
+                .unwrap_or(0);
+
+            // Get actual size of newer snapshot
+            let show_new = Command::new("btrfs")
+                .args(&["subvolume", "show", &newer_str])
+                .output()
+                .context("failed to run btrfs subvolume show on newer snapshot")?;
+            let show_new_output = String::from_utf8_lossy(&show_new.stdout);
+            let newer_bytes = show_new_output
+                .lines()
+                .find(|l| l.contains("Referenced:"))
+                .and_then(|l| l.split(':').last())
+                .and_then(|s| parse_size_bytes(s))
+                .unwrap_or(0);
+
+            // Get changed bytes via btrfs subvolume find-new
+            let find_new = Command::new("btrfs")
+                .args(&[
+                    "subvolume",
+                    "find-new",
+                    &newer_str,
+                    &older_cgen.to_string(),
+                ])
+                .output()
+                .context("failed to run btrfs subvolume find-new")?;
+            let find_new_output = String::from_utf8_lossy(&find_new.stdout);
+            let changed_bytes = find_new_output
+                .lines()
+                .filter(|l| l.contains("total"))
+                .last()
+                .and_then(|l| l.split_whitespace().next())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+
+            let diff = DiffService::estimate_changes(
+                older_bytes,
+                newer_bytes,
+                changed_bytes,
+                &older_snapshot,
+                &newer_snapshot,
+            );
             print_diff(&diff);
             Ok(())
         }
@@ -1240,6 +1301,33 @@ fn print_status(report: &mybtrfs_application::status::StatusReport) {
 }
 
 /// Print snapshot diff summary.
+/// Parse size strings from btrfs output (e.g., "100.00GiB" → 107374182400)
+fn parse_size_bytes(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    let (num_str, unit) = if let Some(pos) = trimmed
+        .chars()
+        .position(|c| !c.is_ascii_digit() && c != '.')
+    {
+        trimmed.split_at(pos)
+    } else {
+        return None;
+    };
+
+    let bytes = num_str.parse::<f64>().ok()?;
+    let multiplier = match unit.trim() {
+        s if s.starts_with("B") => 1.0,
+        s if s.starts_with("KiB") => 1024.0,
+        s if s.starts_with("KB") => 1000.0,
+        s if s.starts_with("MiB") => 1024.0 * 1024.0,
+        s if s.starts_with("MB") => 1000.0 * 1000.0,
+        s if s.starts_with("GiB") => 1024.0 * 1024.0 * 1024.0,
+        s if s.starts_with("GB") => 1000.0 * 1000.0 * 1000.0,
+        _ => return None,
+    };
+
+    Some((bytes * multiplier) as u64)
+}
+
 fn print_diff(diff: &mybtrfs_application::diff::DiffSummary) {
     println!(
         "{}\t{}\t{}\t{}\t{}",
