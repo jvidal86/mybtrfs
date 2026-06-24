@@ -39,19 +39,22 @@ impl Default for IndicatifProgress {
 impl ProgressPort for IndicatifProgress {
     fn start_spinner(&self, msg: &str) {
         let bar = ProgressBar::new_spinner();
+        // Professional spinner with rotating block animation
         bar.set_style(
-            ProgressStyle::with_template("{spinner:.blue} {msg}")
-                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                .tick_strings(&["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"]),
         );
         bar.set_message(msg.to_owned());
-        bar.enable_steady_tick(Duration::from_millis(80));
+        bar.enable_steady_tick(Duration::from_millis(200));
         replace_bar(&self.bar, bar);
     }
 
     fn start_bar(&self, msg: &str, total: u64) {
         let bar = ProgressBar::new(total);
+        // Professional progress bar with block characters and percentage
         bar.set_style(
-            ProgressStyle::with_template("{msg} [{bar:30.cyan/blue}] {pos}/{len}")
+            ProgressStyle::with_template("{msg}\n{bar:40.red/red} {percent}%")
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
         bar.set_message(msg.to_owned());
