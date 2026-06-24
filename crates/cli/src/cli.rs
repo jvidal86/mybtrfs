@@ -1079,7 +1079,7 @@ fn validate_new_path(path: &Path) -> Result<PathBuf> {
 /// Print a one-fact-per-line summary of a completed run.
 fn print_run_report(report: &RunReport) {
     println!(
-        "snapshot: {}",
+        "snapshot\t{}",
         report
             .snapshot
             .mountpoint
@@ -1087,11 +1087,11 @@ fn print_run_report(report: &RunReport) {
             .display()
     );
     println!(
-        "backup:   {}",
+        "backup\t{}",
         report.backup.mountpoint.join(&report.backup.path).display()
     );
     println!(
-        "pruned {} snapshot(s), {} backup(s)",
+        "pruned\t{}\t{}",
         report.snapshots_pruned.delete.len(),
         report.backups_pruned.delete.len()
     );
@@ -1101,13 +1101,13 @@ fn print_run_report(report: &RunReport) {
 fn print_resume_report(report: &ResumeReport) {
     match &report.transferred {
         Some(backup) => println!(
-            "transferred: {}",
+            "transferred\t{}",
             backup.mountpoint.join(&backup.path).display()
         ),
-        None => println!("nothing to resume: the latest snapshot is already backed up"),
+        None => println!("status\talready_backed_up"),
     }
     println!(
-        "pruned {} snapshot(s), {} backup(s)",
+        "pruned\t{}\t{}",
         report.snapshots_pruned.delete.len(),
         report.backups_pruned.delete.len()
     );
@@ -1118,24 +1118,15 @@ fn print_resume_report(report: &ResumeReport) {
 /// dry-run delete port).
 fn print_prune_report(report: &PruneReport, dry_run: bool) {
     if dry_run {
-        println!();
-        println!("Retention Policy Preview — Snapshot Side");
-        println!("─────────────────────────────────────");
-        println!(
-            "{}",
-            retention_preview::format_schedule(&report.snapshots_pruned)
-        );
-        println!();
-        println!("Retention Policy Preview — Backup Side");
-        println!("─────────────────────────────────────");
-        println!(
-            "{}",
-            retention_preview::format_schedule(&report.backups_pruned)
-        );
+        for line in retention_preview::format_schedule(&report.snapshots_pruned).lines() {
+            println!("snapshot\t{}", line);
+        }
+        for line in retention_preview::format_schedule(&report.backups_pruned).lines() {
+            println!("backup\t{}", line);
+        }
     } else {
-        let verb = "pruned";
         println!(
-            "{verb} {} snapshot(s), {} backup(s)",
+            "pruned\t{}\t{}",
             report.snapshots_pruned.delete.len(),
             report.backups_pruned.delete.len()
         );
@@ -1147,29 +1138,26 @@ fn print_prune_report(report: &PruneReport, dry_run: bool) {
 fn print_restore_report(report: &RestoreReport) {
     if report.dry_run {
         if let Some(moved) = &report.moved_aside {
-            println!(
-                "would move aside existing destination to: {}",
-                moved.display()
-            );
+            println!("would_move_aside\t{}", moved.display());
         }
         if report.transferred_back {
-            println!("would transfer the backup back from its remote filesystem first");
+            println!("would_transfer_back\tyes");
         }
-        println!("would restore to: {}", report.dest.display());
+        println!("would_restore\t{}", report.dest.display());
         return;
     }
     if report.transferred_back {
-        println!("transferred the backup back from its remote filesystem");
+        println!("transfer_back\tyes");
     }
     match &report.restored {
         Some(restored) => println!(
-            "restored: {}",
+            "restored\t{}",
             restored.mountpoint.join(&restored.path).display()
         ),
-        None => println!("restored: {}", report.dest.display()),
+        None => println!("restored\t{}", report.dest.display()),
     }
     if let Some(moved) = &report.moved_aside {
-        println!("moved aside existing destination to: {}", moved.display());
+        println!("move_aside\t{}", moved.display());
     }
 }
 
@@ -1178,33 +1166,29 @@ fn print_restore_report(report: &RestoreReport) {
 fn print_inventory(inventory: &Inventory) {
     for status in &inventory.snapshots {
         println!(
-            "snapshot: {}",
+            "snapshot\t{}",
             status
                 .snapshot
                 .mountpoint
                 .join(&status.snapshot.path)
                 .display()
         );
-        if status.backups.is_empty() {
-            println!("  (no backups)");
-        } else {
-            for backup in &status.backups {
-                println!(
-                    "  backup: {}",
-                    backup.mountpoint.join(&backup.path).display()
-                );
-            }
+        for backup in &status.backups {
+            println!(
+                "backup\t{}",
+                backup.mountpoint.join(&backup.path).display()
+            );
         }
     }
     for orphan in &inventory.orphan_backups {
         println!(
-            "orphan backup: {}",
+            "orphan_backup\t{}",
             orphan.mountpoint.join(&orphan.path).display()
         );
     }
     for incomplete in &inventory.incomplete_backups {
         println!(
-            "incomplete backup: {}",
+            "incomplete_backup\t{}",
             incomplete.mountpoint.join(&incomplete.path).display()
         );
     }
@@ -1212,11 +1196,11 @@ fn print_inventory(inventory: &Inventory) {
 
 /// Print aggregate backup statistics, one fact per line.
 fn print_stats(stats: &Stats) {
-    println!("snapshots:   {}", stats.snapshots);
-    println!("backups:     {}", stats.backups);
-    println!("correlated:  {}", stats.correlated);
-    println!("orphaned:    {}", stats.orphaned);
-    println!("incomplete:  {}", stats.incomplete);
+    println!("snapshots\t{}", stats.snapshots);
+    println!("backups\t{}", stats.backups);
+    println!("correlated\t{}", stats.correlated);
+    println!("orphaned\t{}", stats.orphaned);
+    println!("incomplete\t{}", stats.incomplete);
 }
 
 /// Print backup health status.
