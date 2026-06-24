@@ -9,8 +9,11 @@ pub(crate) mod parse;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+
 use mybtrfs_application::ports::{
-    DeleteCommit, DeletePort, PortError, SnapshotPort, SubvolumeRepository, TransferPort,
+    DeleteCommit, DeletePort, PortError, ProgressPort, SnapshotPort, SubvolumeRepository,
+    TransferPort,
 };
 use mybtrfs_domain::model::{Subvolume, Uuid};
 use mybtrfs_domain::parent::ParentSelection;
@@ -30,17 +33,32 @@ const BTRFS: &str = "btrfs";
 pub struct BtrfsCliAdapter {
     runner: Box<dyn CommandRunner>,
     mounts: Box<dyn MountTable>,
+    /// Optional progress reporter for [`TransferPort::send_receive`]. When
+    /// `Some`, a byte-counting bridge thread measures throughput and calls
+    /// [`ProgressPort::report_bytes`] every ~250 ms. `None` uses a direct kernel
+    /// pipe (zero userspace copy overhead) and no progress is reported.
+    progress: Option<Arc<dyn ProgressPort>>,
 }
 
 impl BtrfsCliAdapter {
     /// Create an adapter that spawns the real `btrfs` binary and resolves each
-    /// path's filesystem from `/proc/self/mounts`.
+    /// path's filesystem from `/proc/self/mounts`. No progress reporting by
+    /// default; call [`with_progress`](Self::with_progress) to enable it.
     #[must_use]
     pub fn new() -> Self {
         Self {
             runner: Box::new(SystemCommandRunner),
             mounts: Box::new(ProcMounts),
+            progress: None,
         }
+    }
+
+    /// Attach a [`ProgressPort`] for transfer byte counting. Returns `self` for
+    /// builder-style chaining.
+    #[must_use]
+    pub fn with_progress(mut self, progress: Arc<dyn ProgressPort>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     /// Create an adapter whose every btrfs operation runs on a remote host over
@@ -56,6 +74,7 @@ impl BtrfsCliAdapter {
                 endpoint.clone(),
             )),
             mounts: Box::new(SshMountTable::new(Box::new(SystemCommandRunner), endpoint)),
+            progress: None,
         }
     }
 
@@ -72,6 +91,7 @@ impl BtrfsCliAdapter {
                 endpoint,
             )),
             mounts: Box::new(ProcMounts),
+            progress: None,
         }
     }
 
@@ -243,12 +263,22 @@ impl TransferPort for BtrfsCliAdapter {
 
         let receive_args = [OsStr::new("receive"), target_dir.as_os_str()];
 
+        // Build the optional byte-counting callback. When progress is wired,
+        // the bridge thread calls this every ~250 ms; when None, a direct
+        // kernel pipe is used (zero userspace copy overhead).
+        let on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>> =
+            self.progress.as_ref().map(|p| {
+                let p = Arc::clone(p);
+                Arc::new(move |total, speed| p.report_bytes(total, speed))
+                    as Arc<dyn Fn(u64, u64) + Send + Sync>
+            });
+
         // Send/receive, then ALWAYS inspect the target: even on a pipe error a
         // partially-received (garbled) subvolume may be left behind and must be
         // cleaned up (invariant #2); a success is never trusted on exit code (#1).
         let transfer = self
             .runner
-            .pipe((BTRFS, &send_args), (BTRFS, &receive_args));
+            .pipe((BTRFS, &send_args), (BTRFS, &receive_args), on_progress);
 
         let received_name = source.path.file_name().ok_or_else(|| {
             PortError::Verification(format!("source subvolume {:?} has no name", source.path))
@@ -326,7 +356,11 @@ fn verify_received(received: &Subvolume, full: bool) -> Result<(), PortError> {
 impl BtrfsCliAdapter {
     /// Test constructor injecting a fake command runner and mount table.
     fn with_parts(runner: Box<dyn CommandRunner>, mounts: Box<dyn MountTable>) -> Self {
-        Self { runner, mounts }
+        Self {
+            runner,
+            mounts,
+            progress: None,
+        }
     }
 }
 
@@ -510,6 +544,7 @@ ID 260 gen 130 cgen 130 top level 5 parent_uuid b2b2b2b2-2222-4222-8222-22222222
             &self,
             producer: (&str, &[&OsStr]),
             consumer: (&str, &[&OsStr]),
+            _on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
         ) -> Result<(), PortError> {
             self.record(producer.0, producer.1);
             self.record(consumer.0, consumer.1);

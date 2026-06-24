@@ -210,3 +210,48 @@ pub trait Journal {
     /// [`PortError::Io`] if the entry cannot be written.
     fn record(&self, message: &str) -> Result<(), PortError>;
 }
+
+/// Terminal progress reporting — driven by the CLI composition root.
+///
+/// The application layer calls these methods to communicate operation progress
+/// to the user. The CLI wires a live terminal implementation (braille spinner
+/// and count bars) when stderr is a TTY and `--quiet` is not set; otherwise it
+/// wires [`NullProgress`] (a no-op). All methods are `Send + Sync` because
+/// [`report_bytes`](ProgressPort::report_bytes) is called from the transfer
+/// adapter's byte-counting thread.
+pub trait ProgressPort: Send + Sync {
+    /// Begin an indeterminate step: display a braille spinner with `msg`.
+    /// Replaces any previously active indicator.
+    fn start_spinner(&self, msg: &str);
+
+    /// Begin a counted progress bar labelled `msg` for `total` items.
+    /// Replaces any previously active indicator.
+    fn start_bar(&self, msg: &str, total: u64);
+
+    /// Advance the active count bar by `n` items.
+    fn advance_bar(&self, n: u64);
+
+    /// Update the active spinner with the bytes transferred so far and the
+    /// current throughput. Called from the transfer adapter's counting thread.
+    fn report_bytes(&self, total_bytes: u64, bytes_per_sec: u64);
+
+    /// Complete the active indicator, optionally showing `msg`; a blank
+    /// `msg` clears the indicator without leaving a completion line.
+    fn finish(&self, msg: &str);
+}
+
+/// No-op [`ProgressPort`] used when `--quiet` is set, stderr is not a TTY,
+/// or in dry-run mode. All methods return immediately.
+pub struct NullProgress;
+
+impl ProgressPort for NullProgress {
+    fn start_spinner(&self, _msg: &str) {}
+    fn start_bar(&self, _msg: &str, _total: u64) {}
+    fn advance_bar(&self, _n: u64) {}
+    fn report_bytes(&self, _total_bytes: u64, _bytes_per_sec: u64) {}
+    fn finish(&self, _msg: &str) {}
+}
+
+/// A static [`NullProgress`] suitable as a default `&'static dyn ProgressPort`
+/// for service constructors that don't require explicit progress wiring.
+pub static NULL_PROGRESS: NullProgress = NullProgress;

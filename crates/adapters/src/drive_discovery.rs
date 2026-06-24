@@ -136,6 +136,7 @@ mod tests {
             &self,
             _producer: (&str, &[&OsStr]),
             _consumer: (&str, &[&OsStr]),
+            _on_progress: Option<std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>>,
         ) -> Result<(), PortError> {
             Err(PortError::Command(
                 "drive discovery does not pipe".to_owned(),

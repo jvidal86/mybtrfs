@@ -10,9 +10,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use std::io::IsTerminal;
+use std::sync::Arc;
+
 use mybtrfs_adapters::{
-    AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, LocalFsAdapter,
-    LsblkDriveDiscovery, NullJournal, StdioPrompter, SystemClock, parse_endpoint,
+    AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, IndicatifProgress,
+    LocalFsAdapter, LsblkDriveDiscovery, NullJournal, StdioPrompter, SystemClock, parse_endpoint,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
@@ -134,6 +137,10 @@ struct Cli {
     /// non-interactive / cron use.
     #[arg(long, global = true)]
     yes: bool,
+    /// Suppress progress indicators and post-run summary (for cron / scripting).
+    /// Progress is also suppressed automatically when stderr is not a TTY.
+    #[arg(short = 'q', long, global = true)]
+    quiet: bool,
     /// Append a timestamped audit line for this invocation to the given file.
     #[arg(long, global = true, value_name = "PATH")]
     journal: Option<PathBuf>,
@@ -359,6 +366,14 @@ fn dispatch(cli: &Cli) -> Result<()> {
     } else {
         None
     };
+    // Progress indicator: enabled when stderr is a TTY and `--quiet` is not set.
+    let use_progress = !cli.quiet && std::io::stderr().is_terminal();
+    let progress: Arc<dyn mybtrfs_application::ports::ProgressPort> = if use_progress {
+        Arc::new(IndicatifProgress::new())
+    } else {
+        Arc::new(mybtrfs_application::ports::NullProgress)
+    };
+
     // The committing retention service deletes through `btrfs`, but logs each
     // deletion here so partial progress is visible if a fail-fast prune aborts
     // mid-loop (decision ID-1). The dry-run path keeps its own `DryRunDeletePort`.
@@ -378,6 +393,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             TimestampFormat::Long,
             incremental,
         )
+        .with_progress(progress.as_ref())
     };
 
     match &cli.command {

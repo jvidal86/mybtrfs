@@ -4,8 +4,9 @@
 //! array, **never** a shell); tests inject a fake.
 
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use mybtrfs_application::ports::PortError;
 
@@ -23,6 +24,12 @@ pub(crate) trait CommandRunner {
     /// consumer's stdin, and wait on both. For `btrfs send … | btrfs receive …`.
     /// Each argument is `(program, args)`.
     ///
+    /// When `on_progress` is `Some`, a userspace bridge thread reads from the
+    /// producer's stdout, counts bytes, calls the callback with `(total_bytes,
+    /// bytes_per_sec)` every ~250 ms, and forwards data to the consumer. When
+    /// `None`, the producer's stdout is connected directly to the consumer's
+    /// stdin via a kernel pipe (zero userspace copy overhead).
+    ///
     /// # Errors
     /// [`PortError::Io`] if either process cannot be spawned; [`PortError::Command`]
     /// if either exits unsuccessfully (with the relevant stderr in the message).
@@ -30,6 +37,7 @@ pub(crate) trait CommandRunner {
         &self,
         producer: (&str, &[&OsStr]),
         consumer: (&str, &[&OsStr]),
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<(), PortError>;
 }
 
@@ -63,6 +71,7 @@ impl CommandRunner for SystemCommandRunner {
         &self,
         producer: (&str, &[&OsStr]),
         consumer: (&str, &[&OsStr]),
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<(), PortError> {
         // Spawn the producer with its stdout piped, then hand that pipe to the
         // consumer's stdin. Ordering matters (04 §8): the consumer drains the data
@@ -74,14 +83,60 @@ impl CommandRunner for SystemCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let producer_stdout = producer_child.stdout.take().ok_or_else(|| {
+        let mut producer_stdout = producer_child.stdout.take().ok_or_else(|| {
             PortError::Command(format!("`{}` exposed no stdout pipe", producer.0))
         })?;
         let producer_stderr = producer_child.stderr.take();
 
+        let consumer_stdin: Stdio = if let Some(cb) = on_progress {
+            // Instrumented path: insert a counting bridge between producer
+            // stdout and consumer stdin so we can measure throughput.
+            let (pipe_reader, pipe_writer) = std::io::pipe()?;
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                let mut total: u64 = 0;
+                let start = std::time::Instant::now();
+                let mut last_report = std::time::Instant::now();
+                let mut writer = pipe_writer;
+                loop {
+                    let n = match producer_stdout.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    if writer.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    total += n as u64;
+                    if last_report.elapsed() >= std::time::Duration::from_millis(250) {
+                        let secs = start.elapsed().as_secs_f64();
+                        let speed = if secs > 0.0 {
+                            (total as f64 / secs) as u64
+                        } else {
+                            0
+                        };
+                        cb(total, speed);
+                        last_report = std::time::Instant::now();
+                    }
+                }
+                // Final report after transfer completes.
+                let secs = start.elapsed().as_secs_f64();
+                let speed = if secs > 0.0 {
+                    (total as f64 / secs) as u64
+                } else {
+                    0
+                };
+                cb(total, speed);
+                // `writer` is dropped here, sending EOF to consumer's stdin.
+            });
+            pipe_reader.into()
+        } else {
+            // Fast path: direct kernel pipe, zero userspace copy.
+            producer_stdout.into()
+        };
+
         let consumer_child = Command::new(consumer.0)
             .args(consumer.1)
-            .stdin(Stdio::from(producer_stdout))
+            .stdin(consumer_stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;

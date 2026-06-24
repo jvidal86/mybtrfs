@@ -11,6 +11,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use mybtrfs_application::ports::PortError;
 
@@ -161,13 +162,14 @@ impl CommandRunner for SshCommandRunner {
         &self,
         producer: (&str, &[&OsStr]),
         consumer: (&str, &[&OsStr]),
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<(), PortError> {
         // The producer (`btrfs send`) stays local; only the consumer (`btrfs
         // receive`) runs on the remote target.
         let (consumer_program, consumer_args) = consumer;
         let (ssh_program, ssh_args) = self.endpoint.command(true, consumer_program, consumer_args);
         self.inner
-            .pipe(producer, (ssh_program, &arg_refs(&ssh_args)))
+            .pipe(producer, (ssh_program, &arg_refs(&ssh_args)), on_progress)
     }
 }
 
@@ -199,13 +201,14 @@ impl CommandRunner for SshSourceRunner {
         &self,
         producer: (&str, &[&OsStr]),
         consumer: (&str, &[&OsStr]),
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<(), PortError> {
         // The producer (`btrfs send` of the remote backup) runs over ssh; the
         // consumer (`btrfs receive` into local staging) stays local.
         let (producer_program, producer_args) = producer;
         let (ssh_program, ssh_args) = self.endpoint.command(true, producer_program, producer_args);
         self.inner
-            .pipe((ssh_program, &arg_refs(&ssh_args)), consumer)
+            .pipe((ssh_program, &arg_refs(&ssh_args)), consumer, on_progress)
     }
 }
 
@@ -268,6 +271,7 @@ mod tests {
             &self,
             producer: (&str, &[&OsStr]),
             consumer: (&str, &[&OsStr]),
+            _on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
         ) -> Result<(), PortError> {
             self.log
                 .borrow_mut()
@@ -463,6 +467,7 @@ mod tests {
                     "btrfs",
                     &[OsStr::new("receive"), OsStr::new("/mnt/btrfs-test")],
                 ),
+                None,
             )
             .unwrap();
         // Producer is still a local `btrfs send`; only the consumer is ssh-wrapped.
@@ -512,6 +517,7 @@ mod tests {
                     "btrfs",
                     &[OsStr::new("receive"), OsStr::new("/pool/staging")],
                 ),
+                None,
             )
             .unwrap();
         // Producer (send) is ssh-wrapped; consumer (receive) stays a local btrfs.

@@ -15,7 +15,8 @@ use mybtrfs_domain::retention::{RetentionPolicy, Schedule};
 use mybtrfs_domain::safety::{SafetyContext, latest_common_pair};
 
 use crate::ports::{
-    ClockPort, DeleteCommit, PortError, SnapshotPort, SubvolumeRepository, TransferPort,
+    ClockPort, DeleteCommit, NULL_PROGRESS, PortError, ProgressPort, SnapshotPort,
+    SubvolumeRepository, TransferPort,
 };
 use crate::retention::RetentionService;
 
@@ -77,13 +78,16 @@ pub struct BackupService<'a> {
     /// Incremental-send strategy — `Yes` (use a parent when one exists, else
     /// full), `Strict` (require a parent), or `No` (always full).
     incremental: Incremental,
+    /// Progress reporter; [`NullProgress`](crate::ports::NullProgress) by
+    /// default (no-op). Set via [`with_progress`](Self::with_progress).
+    progress: &'a dyn ProgressPort,
 }
 
 impl<'a> BackupService<'a> {
     /// Construct a service with the default incremental mode ([`Incremental::Yes`]):
     /// over the injected clock, the source/target subvolume repositories, the
     /// snapshot and transfer ports, the retention service, and the timestamp
-    /// format used for snapshot names.
+    /// format used for snapshot names. Progress reporting defaults to no-op.
     #[must_use]
     pub fn new(
         clock: &'a dyn ClockPort,
@@ -104,6 +108,13 @@ impl<'a> BackupService<'a> {
             format,
             Incremental::Yes,
         )
+    }
+
+    /// Set the [`ProgressPort`] for this service. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_progress(mut self, progress: &'a dyn ProgressPort) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Like [`new`](Self::new) but with an explicit [`Incremental`] mode
@@ -129,6 +140,7 @@ impl<'a> BackupService<'a> {
             retention,
             format,
             incremental,
+            progress: &NULL_PROGRESS,
         }
     }
 
@@ -196,13 +208,22 @@ impl<'a> BackupService<'a> {
 
         // Source snapshots (incl. the new one) and the backups already on target —
         // each read from its own filesystem's repository — drive parent resolution.
+        self.progress.start_spinner("Scanning backups…");
         let snapshots = self.collect_in(self.source_repo, snapshot_dir, &snapshot)?;
         let mut backups = existing_in(self.target_repo, target_dir)?;
+        self.progress.finish("");
 
         let selection = self.choose_parent(&snapshot, &snapshots, &backups)?;
+        let incremental = selection.parent.is_some();
+        self.progress.start_spinner(if incremental {
+            "Transferring… (incremental)"
+        } else {
+            "Transferring… (full send)"
+        });
         let backup = self
             .transfer
             .send_receive(&snapshot, &selection, target_dir)?;
+        self.progress.finish("Transfer complete");
         log::info!(
             "run: backup received: {}",
             backup.mountpoint.join(&backup.path).display()
@@ -221,6 +242,25 @@ impl<'a> BackupService<'a> {
             HashSet::from([snapshot.id]),
             HashSet::from([backup.id]),
         )?;
+
+        let backup_delete_count = backups_pruned.delete.len();
+        if backup_delete_count > 0 {
+            self.progress
+                .start_bar("Pruning backups", backup_delete_count as u64);
+            // Note: prune_both already performed the deletions; progress tracking
+            // for deletion happens in the retention service below. For now, just
+            // show completion.
+            self.progress
+                .finish(&format!("Pruned {backup_delete_count} backups"));
+        }
+
+        let snapshot_delete_count = snapshots_pruned.delete.len();
+        if snapshot_delete_count > 0 {
+            self.progress
+                .start_bar("Pruning snapshots", snapshot_delete_count as u64);
+            self.progress
+                .finish(&format!("Pruned {snapshot_delete_count} snapshots"));
+        }
 
         Ok(RunReport {
             snapshot,

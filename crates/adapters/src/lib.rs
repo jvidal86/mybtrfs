@@ -11,6 +11,7 @@ pub(crate) mod journal;
 pub(crate) mod local_fs;
 pub(crate) mod lock;
 pub(crate) mod mounts;
+pub(crate) mod progress;
 pub(crate) mod prompter;
 pub(crate) mod ssh;
 
@@ -40,6 +41,10 @@ pub use journal::{FileJournal, NullJournal};
 /// Concurrency guard: [`FileLock`] — an advisory `flock` serializing mutating
 /// runs (released on drop / process exit).
 pub use lock::FileLock;
+
+/// Terminal progress reporter: [`IndicatifProgress`] renders braille spinners
+/// and count bars during long-running operations.
+pub use progress::IndicatifProgress;
 
 /// Remote SSH addressing (Phase 5 §2): [`Endpoint`] (local vs remote),
 /// [`SshEndpoint`], and [`parse_endpoint`] — pure `ssh … -- [sudo] btrfs …`
