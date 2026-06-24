@@ -40,11 +40,7 @@ impl DiffService {
     /// # Returns
     /// A `DiffSummary` with estimated byte counts and human-readable sizes.
     #[must_use]
-    pub fn estimate_changes(
-        older_path: &Path,
-        older_cgen: u64,
-        newer_path: &Path,
-    ) -> DiffSummary {
+    pub fn estimate_changes(older_path: &Path, older_cgen: u64, newer_path: &Path) -> DiffSummary {
         // In a real implementation, this would call:
         // `btrfs subvolume show` to get actual sizes, and
         // `btrfs subvolume find-new <newer_path> <older_cgen>` for changed bytes.
