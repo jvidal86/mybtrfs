@@ -1,6 +1,10 @@
 # mybtrfs
 
-> ⚠️ Early scaffold — design complete, implementation not started.
+[![CI](https://img.shields.io/github/actions/workflow/status/jvidal86/mybtrfs/ci.yml?label=CI)](https://github.com/jvidal86/mybtrfs/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/jvidal86/mybtrfs)](https://codecov.io/gh/jvidal86/mybtrfs)
+[![Tests](https://img.shields.io/github/actions/workflow/status/jvidal86/mybtrfs/ci.yml?label=tests)](https://github.com/jvidal86/mybtrfs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/jvidal86/mybtrfs)](LICENSE)
+[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-d97757?logo=anthropic&logoColor=white)](https://claude.ai/code)
 
 `mybtrfs` is a backup tool for **btrfs subvolumes**, written in **Rust** — a
 reimagining of [btrbk](https://github.com/digint/btrbk): atomic read-only
