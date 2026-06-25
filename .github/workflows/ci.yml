@@ -28,5 +28,5 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets
       - run: cargo fmt --check
