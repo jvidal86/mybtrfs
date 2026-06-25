@@ -21,6 +21,7 @@ toml.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

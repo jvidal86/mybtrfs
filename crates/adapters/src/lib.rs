@@ -14,6 +14,7 @@ pub(crate) mod lock;
 pub(crate) mod mounts;
 pub(crate) mod progress;
 pub(crate) mod prompter;
+pub(crate) mod raw_stream;
 pub(crate) mod ssh;
 
 /// Backup-set file parser (Phase 5 §4): pure TOML parsing for multi-job backup files.
@@ -49,6 +50,11 @@ pub use lock::FileLock;
 /// Terminal progress reporter: [`IndicatifProgress`] renders braille spinners
 /// and count bars during long-running operations.
 pub use progress::IndicatifProgress;
+
+/// Raw & encrypted stream target adapter (Phase 5 §3): [`RawStreamAdapter`]
+/// writes `btrfs send | [compress] | [encrypt] > file` and manages `.info`
+/// sidecar files; [`RawCompress`] selects the compression codec.
+pub use raw_stream::{RawCompress, RawStreamAdapter};
 
 /// Remote SSH addressing (Phase 5 §2): [`Endpoint`] (local vs remote),
 /// [`SshEndpoint`], and [`parse_endpoint`] — pure `ssh … -- [sudo] btrfs …`

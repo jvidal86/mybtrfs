@@ -16,14 +16,15 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset};
 use mybtrfs_adapters::{
     AutoPrompter, BtrfsCliAdapter, Endpoint, FileJournal, FileLock, IndicatifProgress,
-    LocalFsAdapter, LsblkDriveDiscovery, StdioPrompter, SystemClock, parse_endpoint,
+    LocalFsAdapter, LsblkDriveDiscovery, RawCompress, RawStreamAdapter, StdioPrompter, SystemClock,
+    parse_endpoint,
 };
 use mybtrfs_application::backup::{BackupService, ResumeReport, RunReport};
 use mybtrfs_application::inventory::{Inventory, InventoryService, Stats};
 use mybtrfs_application::local_subvolumes::LocalSubvolumesService;
 use mybtrfs_application::ports::{
     ClockPort, DeleteCommit, DeletePort, DiffPort, DiscoveredFilesystem, DriveDiscoveryPort,
-    FilesystemPort, Journal, PortError, Prompter, SubvolumeRepository,
+    FilesystemPort, Journal, PortError, Prompter, SnapshotPort, SubvolumeRepository,
 };
 use mybtrfs_application::prune::{PruneReport, PruneService};
 use mybtrfs_application::restore::{RestoreReport, RestoreService};
@@ -334,6 +335,18 @@ enum Command {
         /// For backup-set runs, override per-entry with `post_snapshot_hook` in the file.
         #[arg(long, value_name = "CMD")]
         post_snapshot_hook: Option<String>,
+        /// Write a raw btrfs stream file instead of btrfs-receiving into a btrfs
+        /// filesystem. Enables the `btrfs send | [compress] | [encrypt] > file`
+        /// pipeline. Incompatible with `--set` and `ssh://` targets.
+        #[arg(long)]
+        raw: bool,
+        /// Compression codec for raw stream files (requires `--raw`).
+        #[arg(long, value_name = "CODEC", default_value = "zstd")]
+        compress: Compress,
+        /// GPG passphrase file for symmetric encryption of raw stream files
+        /// (requires `--raw`; omit for unencrypted raw streams).
+        #[arg(long, value_name = "PATH")]
+        passphrase_file: Option<PathBuf>,
         #[command(flatten)]
         retention: RetentionArgs,
     },
@@ -348,6 +361,17 @@ enum Command {
         /// `btrfs send -p` strategy.
         #[arg(long, value_enum, default_value_t = IncrementalArg::Yes)]
         incremental: IncrementalArg,
+        /// Write a raw btrfs stream file instead of btrfs-receiving (must match the
+        /// original `run --raw`).
+        #[arg(long)]
+        raw: bool,
+        /// Compression codec for raw stream files (requires `--raw`).
+        #[arg(long, value_name = "CODEC", default_value = "zstd")]
+        compress: Compress,
+        /// GPG passphrase file for symmetric encryption of raw stream files
+        /// (requires `--raw`).
+        #[arg(long, value_name = "PATH")]
+        passphrase_file: Option<PathBuf>,
         #[command(flatten)]
         retention: RetentionArgs,
     },
@@ -365,8 +389,9 @@ enum Command {
     },
     /// Restore a backup to a writable subvolume at `dest` (Phase 4).
     Restore {
-        /// The backup to restore: a read-only subvolume — a local path, or a
-        /// remote `ssh://[user@]host[:port]/path` source.
+        /// The backup to restore: a read-only btrfs subvolume (local or
+        /// `ssh://` path), or a raw stream leaf path (the `.info` sidecar
+        /// is detected automatically alongside it).
         backup: PathBuf,
         /// Where to create the writable restored subvolume.
         dest: PathBuf,
@@ -378,6 +403,9 @@ enum Command {
         /// creating, moving, or deleting anything.
         #[arg(long)]
         dry_run: bool,
+        /// GPG passphrase file for decrypting raw encrypted stream backups.
+        #[arg(long, value_name = "PATH")]
+        passphrase_file: Option<PathBuf>,
     },
     /// List source snapshots with their correlated backups (inventory view).
     List {
@@ -435,6 +463,31 @@ impl From<IncrementalArg> for Incremental {
             IncrementalArg::Yes => Self::Yes,
             IncrementalArg::Strict => Self::Strict,
             IncrementalArg::No => Self::No,
+        }
+    }
+}
+
+/// Compression codec for raw stream targets (`--compress`); mirrors [`RawCompress`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+enum Compress {
+    /// zstd (default, best ratio/speed balance).
+    #[default]
+    Zstd,
+    /// gzip (wide compatibility).
+    Gzip,
+    /// xz (maximum compression, slowest).
+    Xz,
+    /// No compression.
+    None,
+}
+
+impl From<Compress> for RawCompress {
+    fn from(c: Compress) -> Self {
+        match c {
+            Compress::Zstd => Self::Zstd,
+            Compress::Gzip => Self::Gzip,
+            Compress::Xz => Self::Xz,
+            Compress::None => Self::None,
         }
     }
 }
@@ -770,6 +823,9 @@ fn dispatch(cli: &Cli) -> Result<()> {
             incremental,
             pre_snapshot_hook,
             post_snapshot_hook,
+            raw,
+            compress,
+            passphrase_file,
             retention: retention_args,
         } => {
             let snapshot_policy = retention_args.snapshot_policy()?;
@@ -779,6 +835,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
             // If --set is provided, parse the backup-set file and loop through entries.
             // Otherwise, process the single backup from individual args.
             if let Some(set_path) = set {
+                if *raw {
+                    return Err(anyhow::Error::new(UsageError(
+                        "--raw is incompatible with --set; use --raw on individual backup commands only".to_string(),
+                    )));
+                }
                 let set_content =
                     std::fs::read_to_string(&set_path).context("failed to read backup-set file")?;
                 let entries = mybtrfs_adapters::parse_backup_set(&set_content)
@@ -907,6 +968,12 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     )
                 })?;
 
+                if passphrase_file.is_some() && !raw {
+                    return Err(anyhow::Error::new(UsageError(
+                        "--passphrase-file requires --raw".to_string(),
+                    )));
+                }
+
                 let source = validate_path(&source_val)?;
                 ensure_dir(&localfs, prompter.as_ref(), &snapshot_dir_val)?;
                 let snapshot_dir = validate_path(&snapshot_dir_val)?;
@@ -926,6 +993,51 @@ fn dispatch(cli: &Cli) -> Result<()> {
                             .join(hostname()),
                     ),
                 };
+
+                if *raw {
+                    // Raw stream pipeline: btrfs send | [compress] | [encrypt] > file
+                    let dir = match target {
+                        Endpoint::Local(dir) => dir,
+                        Endpoint::Remote { .. } => {
+                            return Err(anyhow::Error::new(UsageError(
+                                "--raw is incompatible with ssh:// targets".to_string(),
+                            )));
+                        }
+                    };
+                    ensure_dir(&localfs, prompter.as_ref(), &dir)?;
+                    let dir = validate_path(&dir)?;
+                    let raw_adapter = RawStreamAdapter::new(
+                        dir.clone(),
+                        (*compress).into(),
+                        passphrase_file.clone(),
+                    );
+                    let routing = RoutingDeletePort::new(&btrfs, &raw_adapter, dir.clone());
+                    let logged = LoggingDeletePort::new(&routing);
+                    let raw_retention = RetentionService::new(&clock, &logged);
+                    let report = BackupService::with_incremental(
+                        &clock,
+                        &btrfs,       // source_repo (local btrfs snapshots)
+                        &raw_adapter, // target_repo (sidecar-based)
+                        &btrfs,       // snapshots (local btrfs)
+                        &raw_adapter, // transfer (raw pipeline)
+                        &raw_retention,
+                        TimestampFormat::Long,
+                        incremental,
+                    )
+                    .with_progress(progress.as_ref())
+                    .run(
+                        &source,
+                        &snapshot_dir,
+                        &basename_val,
+                        &dir,
+                        &snapshot_policy,
+                        &target_policy,
+                    )
+                    .context("backup run failed")?;
+                    print_run_report(&report);
+                    post_guard.finish()?;
+                    return Ok(());
+                }
 
                 let report = match target {
                     Endpoint::Local(dir) => {
@@ -998,7 +1110,54 @@ fn dispatch(cli: &Cli) -> Result<()> {
             dest,
             force,
             dry_run,
+            passphrase_file,
         } => {
+            // Detect a raw stream target: a `.info` sidecar alongside the leaf path.
+            // sidecar_path_for: append ".info" to the OsStr (NOT path.with_extension
+            // which would replace the timestamp in btrbk-style names like
+            // `home.20260625T020000+0200`).
+            let sidecar_path = {
+                let mut s = backup.as_os_str().to_owned();
+                s.push(".info");
+                std::path::PathBuf::from(s)
+            };
+            if sidecar_path.exists() {
+                // Raw stream restore: gpg --decrypt | decompress | btrfs receive
+                if *force {
+                    return Err(anyhow::Error::new(UsageError(
+                        "--force is not supported for raw stream restore".to_string(),
+                    )));
+                }
+                let dest = validate_new_path(dest)?;
+                if *dry_run {
+                    println!("would_restore_raw\t{}", dest.display());
+                    return Ok(());
+                }
+                let target_dir = backup
+                    .parent()
+                    .context("backup path has no parent directory")?
+                    .to_path_buf();
+                let raw_adapter = RawStreamAdapter::new(
+                    target_dir,
+                    RawCompress::None, // codec irrelevant for restore; read from sidecar
+                    passphrase_file.clone(),
+                );
+                let dest_parent = dest.parent().context("dest must have a parent directory")?;
+                let staging = raw_adapter
+                    .restore_raw_pipeline(&sidecar_path, dest_parent, passphrase_file.as_deref())
+                    .context("raw restore pipeline failed")?;
+                let restored = btrfs
+                    .make_writable(&staging, &dest)
+                    .context("make_writable failed after raw restore")?;
+                logging_deleter
+                    .delete(&staging, DeleteCommit::Each)
+                    .context("cleanup of raw staging subvolume failed")?;
+                println!(
+                    "restored\t{}",
+                    restored.mountpoint.join(&restored.path).display()
+                );
+                return Ok(());
+            }
             let dest = validate_new_path(dest)?;
             // The backup may be local or a remote `ssh://…` source. A local backup
             // on a different filesystem transfers back via send/receive; a remote
@@ -1111,13 +1270,40 @@ fn dispatch(cli: &Cli) -> Result<()> {
             basename,
             target_dir,
             incremental,
+            raw,
+            compress,
+            passphrase_file,
             retention: retention_args,
         } => {
             let snapshot_dir = validate_path(snapshot_dir)?;
             let target_dir = validate_path(target_dir)?;
             let snapshot_policy = retention_args.snapshot_policy()?;
             let target_policy = retention_args.target_policy()?;
-            let report = backup_with((*incremental).into())
+            if passphrase_file.is_some() && !raw {
+                return Err(anyhow::Error::new(UsageError(
+                    "--passphrase-file requires --raw".to_string(),
+                )));
+            }
+            if *raw {
+                let raw_adapter = RawStreamAdapter::new(
+                    target_dir.clone(),
+                    (*compress).into(),
+                    passphrase_file.clone(),
+                );
+                let routing = RoutingDeletePort::new(&btrfs, &raw_adapter, target_dir.clone());
+                let logged = LoggingDeletePort::new(&routing);
+                let raw_retention = RetentionService::new(&clock, &logged);
+                let report = BackupService::with_incremental(
+                    &clock,
+                    &btrfs,
+                    &raw_adapter,
+                    &btrfs,
+                    &raw_adapter,
+                    &raw_retention,
+                    TimestampFormat::Long,
+                    (*incremental).into(),
+                )
+                .with_progress(progress.as_ref())
                 .resume(
                     &snapshot_dir,
                     basename,
@@ -1126,7 +1312,19 @@ fn dispatch(cli: &Cli) -> Result<()> {
                     &target_policy,
                 )
                 .context("resume failed")?;
-            print_resume_report(&report);
+                print_resume_report(&report);
+            } else {
+                let report = backup_with((*incremental).into())
+                    .resume(
+                        &snapshot_dir,
+                        basename,
+                        &target_dir,
+                        &snapshot_policy,
+                        &target_policy,
+                    )
+                    .context("resume failed")?;
+                print_resume_report(&report);
+            }
             Ok(())
         }
         Command::Prune {
@@ -1351,13 +1549,15 @@ fn describe_command(command: &Command) -> String {
             source,
             target_dir,
             set,
+            raw,
             ..
         } => {
             if let Some(set_path) = set {
                 format!("run (from backup-set: {})", set_path.display())
             } else {
                 format!(
-                    "run {} -> {}",
+                    "run{} {} -> {}",
+                    if *raw { " --raw" } else { "" },
                     source
                         .as_ref()
                         .map_or_else(|| "<missing>".to_owned(), |src| src.display().to_string()),
@@ -1372,9 +1572,11 @@ fn describe_command(command: &Command) -> String {
         Command::Resume {
             snapshot_dir,
             target_dir,
+            raw,
             ..
         } => format!(
-            "resume {} -> {}",
+            "resume{} {} -> {}",
+            if *raw { " --raw" } else { "" },
             snapshot_dir.display(),
             target_dir.display()
         ),
@@ -2010,18 +2212,24 @@ mod tests {
                 set,
                 pre_snapshot_hook,
                 post_snapshot_hook,
+                raw,
+                compress,
+                passphrase_file,
             } => {
                 assert_eq!(source, Some(PathBuf::from("/mnt/pool/home")));
                 assert_eq!(snapshot_dir, Some(PathBuf::from("/mnt/pool/.snapshots")));
                 assert_eq!(basename, Some("home".to_string()));
                 assert_eq!(target_dir, Some(PathBuf::from("/mnt/drive/host")));
                 assert_eq!(set, None);
-                // Defaults: incremental on, no hooks, keep-all retention.
+                // Defaults: incremental on, no hooks, keep-all retention, no raw.
                 assert_eq!(incremental, IncrementalArg::Yes);
                 assert_eq!(pre_snapshot_hook, None);
                 assert_eq!(post_snapshot_hook, None);
                 assert_eq!(retention.snapshot_preserve_min, "all");
                 assert_eq!(retention.snapshot_preserve, "");
+                assert!(!raw);
+                assert_eq!(compress, Compress::Zstd);
+                assert_eq!(passphrase_file, None);
             }
             _ => panic!("expected a Run command"),
         }
@@ -2103,12 +2311,18 @@ mod tests {
                 basename,
                 target_dir,
                 incremental,
+                raw,
+                compress,
+                passphrase_file,
                 ..
             } => {
                 assert_eq!(snapshot_dir, PathBuf::from("/mnt/pool/.snapshots"));
                 assert_eq!(basename, "home");
                 assert_eq!(target_dir, PathBuf::from("/mnt/drive/host"));
                 assert_eq!(incremental, IncrementalArg::Yes);
+                assert!(!raw);
+                assert_eq!(compress, Compress::Zstd);
+                assert_eq!(passphrase_file, None);
             }
             _ => panic!("expected a Resume command"),
         }
@@ -2176,6 +2390,7 @@ mod tests {
             dest,
             force,
             dry_run,
+            passphrase_file,
         } = cli.command
         else {
             panic!("expected a Restore command");
@@ -2184,6 +2399,7 @@ mod tests {
         assert_eq!(dest, PathBuf::from("/mnt/pool/home_restored"));
         assert!(force);
         assert!(dry_run);
+        assert_eq!(passphrase_file, None);
         // Both flags default off and the two positional paths are required.
         let plain = Cli::try_parse_from(["mybtrfs", "restore", "/backup", "/dest"]).unwrap();
         assert!(matches!(
